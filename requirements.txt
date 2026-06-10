@@ -1,0 +1,6 @@
+streamlit
+pandas
+plotly
+httpx
+oracledb
+python-dotenv
