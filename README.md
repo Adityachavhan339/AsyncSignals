@@ -1,6 +1,8 @@
 # AsyncSignals
-
 AsyncSignals is a Solana-first telemetry and market intelligence product that turns raw onchain and market activity into structured signals, operator dashboards, and reusable AI context. The project combines a live dashboard, background ingestion jobs, signal generation, whale flow tracking, and model-generated summaries into one research surface.
+
+#Acknowledgements
+AsyncSignals is grateful for support from the Alchemy Solana Fund.
 
 ## What it does
 
