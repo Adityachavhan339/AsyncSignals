@@ -508,7 +508,7 @@ def get_connection():
     return oracledb.connect(
         user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASSWORD"),
-        dsn="asyncsignalsdatabase_high",
+        dsn="asyncsignalsdatabase_low",
         config_dir="/home/ubuntu/wallet",
         wallet_location="/home/ubuntu/wallet",
         wallet_password=os.getenv("DB_PASSWORD"),
