@@ -5,6 +5,11 @@ AsyncSignals is a Solana-first telemetry and market intelligence product that tu
 
 AsyncSignals is grateful for support from the Alchemy Solana Fund.
 
+
+##Technical Flowchart##
+<img width="1376" height="768" alt="1000062079" src="https://github.com/user-attachments/assets/00bd45ef-e8d1-4c55-9ef2-acf67c32a860" />
+
+
 ## What it does
 
 - Tracks live market context from external crypto market and news sources.
