@@ -1,101 +1,143 @@
 # AsyncSignals
-AsyncSignals is a Solana-first telemetry and market intelligence product that turns raw onchain and market activity into structured signals, operator dashboards, and reusable AI context. The project combines a live dashboard, background ingestion jobs, signal generation, whale flow tracking, and model-generated summaries into one research surface.
 
-#Acknowledgements
+Multi-chain telemetry and market intelligence for teams, analysts, and ecosystem operators. Turns raw onchain activity into structured signals, live dashboards, and reusable API context.
 
-AsyncSignals is grateful for support from the Alchemy Solana Fund.
+Supported chains: Solana, EVM, Base L2, Polkadot.
 
-
+---
 ##Technical Flowchart##
-<img width="1376" height="768" alt="1000062079" src="https://github.com/user-attachments/assets/00bd45ef-e8d1-4c55-9ef2-acf67c32a860" />
+<img width="1536" height="1024" alt="1000062409" src="https://github.com/user-attachments/assets/e53d4600-fa1b-456e-ad35-a0d0707bc4e4" />
+
 
 
 ## What it does
 
-- Tracks live market context from external crypto market and news sources.
-- Detects whale activity across Solana and EVM flows, then stores normalized rows in Oracle-backed tables.
-- Generates execution-oriented signals such as danger, opportunity, volatility, and SOL flow alerts.
-- Produces concise AI summaries for assets like BTC and SOL using stored market context.
-- Exposes everything through a Streamlit dashboard designed for teams, analysts, and ecosystem operators.
+- **Live market data** — prices, market cap, 24h change from CoinGecko and CoinPaprika.
+- **Whale flow tracking** — detects large transfers across Solana, EVM, and Base L2, normalizes to USD, stores in Oracle.
+- **Signal generation** — execution-oriented alerts: danger, opportunity, volatility, SOL flow, based on price + whale + news context.
+- **AI summaries** — LLM-generated market context for BTC, SOL, DOT, and Base L2 from stored telemetry.
+- **Public API** — FastAPI with 17 endpoints, JSON + text formats, CORS-enabled, rate-limited via Nginx.
+- **Streamlit dashboard** — mission control, whale tracker, signal ledger, AI context, chain-specific tabs.
 
-## Repository structure
+---
+
+## Live
+
+- Dashboard: [https://asyncsignals.tech]
+- API: [https://api.asyncsignals.tech/docs]
+- API root: `curl https://api.asyncsignals.tech/`
+
+---
+
+## Acknowledgements
+
+Supported by the [Alchemy Solana Fund](https://www.alchemy.com/solana-20m-fund).
+
+---
+
+## Repository
 
 ```text
 asyncsignals/
-├── app.py
-├── function_app.py
-├── asyncllm.py
+├── app.py              # Streamlit dashboard
+├── api.py              # FastAPI public API
+├── function_app.py     # Core ingestion worker (prices, whales, news, signals)
+├── base.py             # Base L2 collector (blocks, gas, transfers, DEX, bridge)
+├── polkadot.py         # Polkadot collector (parachains, XCM, gov, staking)
+├── asyncllm.py         # AI summary worker (BTC, SOL, DOT, Base)
 ├── requirements.txt
 ├── .env.example
-├── .gitignore
 └── README.md
 ```
 
-### Main files
-
-- `app.py` — Streamlit dashboard and access surface for market, whale, signal, alert, and AI summary views.
-- `function_app.py` — background ingestion, Solana and EVM whale parsing, news and price collection, signal generation, database writes, and Telegram alert broadcasting. 
-- `asyncllm.py` — AI summary generation layer for turning stored market context into readable BTC and SOL summaries.
+---
 
 ## Core features
 
 | Feature | Description |
 |---|---|
-| Dashboard UI | Multi-tab Streamlit interface for mission control, whales, signals, AI context, news, market surface, and alerts. |
-| Solana telemetry | Parses SOL-linked transaction activity and extracts whale-style transfer rows from Solana RPC responses. |
-| Cross-chain whale flow | Pulls EVM asset transfer activity and ranks large transfers using token price lookups. |
-| Signal engine | Builds operator-facing signal rows based on price movement, whale activity, and news context. |
-| AI summaries | Uses LLM providers to generate short market summaries from database context. |
-| Alert routing | Stores subscribers and sends selected alerts through Telegram. |
+| Dashboard | Multi-tab Streamlit: market, whales, signals, AI summaries, Polkadot, Base L2, alerts. |
+| Public API | 17 endpoints: `/market`, `/whales`, `/signals`, `/polkadot`, `/base`, `/bundle`, etc. |
+| Whale flow | Solana (RPC), EVM (Alchemy), Base L2 (5 RPC providers). Normalized to USD. |
+| Signal engine | Danger / opportunity / volatility alerts based on price + whale + news. |
+| AI summaries | Multi-provider LLM fallback (Groq, Cerebras, OpenRouter, Gemini). |
+| Chain telemetry | Polkadot: parachain activity, XCM, governance, staking. Base L2: sequencer, gas, DEX, bridge. |
+| Alert routing | Telegram bot for subscriber notifications. |
+
+---
 
 ## Setup
 
-1. Clone the repository.
-2. Create a virtual environment.
-3. Install dependencies with `pip install -r requirements.txt`.
-4. Copy `.env.example` to `.env` and fill in the required credentials.
-5. Rename the files to `app.py`, `function_app.py`, and `asyncllm.py` if they are still using older names.
+```bash
+git clone https://github.com/YOUR_REPO/asyncsignals.git
+cd asyncsignals
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+# Edit .env with your credentials
+```
 
-## Environment variables
+---
 
-This project expects secrets for database access and third-party APIs. The code references variables for Oracle credentials, wallet configuration, crypto data sources, Solana RPC access, Telegram alerts, and LLM providers, so public repositories should only include placeholders in `.env.example`, not live credentials.
+## Environment
 
-Typical variables include:
+Required variables (see `.env.example` for full list):
 
-- `DBUSER`
-- `DBPASSWORD`
-- `DBDSN`
-- `WALLETDIR`
-- `COINGECKOKEY`
-- `NEWSDATAKEY`
-- `ALCHEMYKEY`
-- `SOLANADRPCURL`
-- `TELEGRAMBOTTOKEN`
-- `CEREBRASAPIKEY`
-- `GROQAPIKEY`
-- `GEMINIAPIKEY` 
+- Oracle DB: `DB_USER`, `DB_PASSWORD`, `DB_DSN`, `WALLET_DIR`
+- Market data: `COINGECKO_KEY`, `NEWSDATA_KEY`
+- Onchain: `ALCHEMY_KEY`, `SOLANA_DRPC_URL`, `HELIUS_API_KEY`
+- Polkadot: `DOTLAKE_API_PARITY_KEY`, `PUBLICNODE_POLKADOT_URL`
+- AI: `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`
+- Alerts: `TELEGRAM_BOT_TOKEN`
 
-## Running the project
+---
+
+## Run
 
 ### Dashboard
-
 ```bash
 streamlit run app.py
 ```
 
-### Backend ingestion worker
-
+### API
 ```bash
-python function_app.py
+uvicorn api:app --host 0.0.0.0 --port 8000 --workers 2
 ```
 
-### AI summary worker
-
+### Workers (cron)
 ```bash
+# Core ingestion — every 5 minutes
+python function_app.py
+
+# Base L2 — every 5 minutes (offset +1)
+python base.py
+
+# Polkadot — every 5 minutes (offset +2)
+python polkadot.py
+
+# AI summaries — every 2 hours
 python asyncllm.py
 ```
 
+---
+
+## Architecture
+
+```
+External sources → Workers → Oracle DB → Nginx → Streamlit / FastAPI
+```
+
+- **Workers**: 4 cron-scheduled Python processes (function_app, base, polkadot, asyncllm).
+- **Database**: Oracle Cloud 26ai Always Free (14+ tables).
+- **API**: FastAPI with RAM cache, auto-refresh, 500+ RPS cached.
+- **Dashboard**: Streamlit with hosted auth, multi-tab, exportable tables.
+- **Infra**: Oracle VM, Nginx reverse proxy, Let's Encrypt SSL, systemd auto-restart.
+
+---
 
 ## Product direction
 
-AsyncSignals is built as a Solana-first observability and intelligence layer rather than a simple retail dashboard. The dashboard copy and backend logic both position it for research teams, analysts, ecosystem operators, and signal-driven workflows.
+Built as developer-facing telemetry infrastructure, not a retail trading tool. Target: research teams, ecosystem operators, analysts, and builders who need clean onchain signal data.
+
+Open source under Apache 2.0.
