@@ -69,7 +69,7 @@ asyncsignals/
 ## Setup
 
 ```bash
-git clone https://github.com/YOUR_REPO/asyncsignals.git
+git clone https://github.com/Adityachavhan339/asyncsignals.git
 cd asyncsignals
 python3 -m venv .venv
 source .venv/bin/activate
