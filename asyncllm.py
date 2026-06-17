@@ -7,7 +7,7 @@ import httpx
 import oracledb
 from dotenv import load_dotenv
 
-load_dotenv("/home/ubuntu/data/.env")
+load_dotenv()
 
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
@@ -46,6 +46,8 @@ def fetch_context_from_db() -> str:
         prices_text = ""
         whales_text = ""
         news_text = ""
+        polkadot_text = ""
+        base_text = ""
 
         cursor.execute("""
             SELECT symbol, current_price, market_cap, price_change_percentage_24h
@@ -82,13 +84,72 @@ def fetch_context_from_db() -> str:
             for r in news_rows
         )
 
+        # Polkadot context
+        cursor.execute("""
+            SELECT relay_chain, chain_name, tx_count, tps, total_fees_usd, activity_score, alert_level
+            FROM POLKADOT_CHAIN_ACTIVITY_DAILY
+            WHERE activity_date = (SELECT MAX(activity_date) FROM POLKADOT_CHAIN_ACTIVITY_DAILY)
+            ORDER BY activity_score DESC
+            FETCH FIRST 10 ROWS ONLY
+        """)
+        polkadot_rows = cursor.fetchall()
+        polkadot_text = "\n".join(
+            f"{r[0]} | {r[1]} | tx={r[2]} tps={r[3]:.3f} fees_usd={r[4]} score={r[5]} alert={r[6]}"
+            for r in polkadot_rows
+        )
+
+        cursor.execute("""
+            SELECT signal_date, signal_family, chain_name, severity, score, title, description
+            FROM POLKADOT_DERIVED_SIGNALS
+            ORDER BY signal_date DESC, score DESC
+            FETCH FIRST 10 ROWS ONLY
+        """)
+        polkadot_signals = cursor.fetchall()
+        if polkadot_signals:
+            polkadot_text += "\n\nPolkadot Signals:\n"
+            polkadot_text += "\n".join(
+                f"[{r[3]}] {r[4]} | {r[1]} | {r[2]} | {r[5]}"
+                for r in polkadot_signals
+            )
+
+        # Base context
+        cursor.execute("""
+            SELECT activity_date, chain_name, tx_count, tps, total_fees_usd, activity_score, alert_level
+            FROM BASE_CHAIN_ACTIVITY_DAILY
+            ORDER BY activity_date DESC
+            FETCH FIRST 1 ROWS ONLY
+        """)
+        base_rows = cursor.fetchall()
+        base_text = "\n".join(
+            f"{r[0]} | {r[1]} | tx={r[2]} tps={r[3]:.3f} fees_usd={r[4]} score={r[5]} alert={r[6]}"
+            for r in base_rows
+        )
+
+        cursor.execute("""
+            SELECT signal_date, signal_family, severity, score, title, description
+            FROM BASE_DERIVED_SIGNALS
+            ORDER BY signal_date DESC, score DESC
+            FETCH FIRST 10 ROWS ONLY
+        """)
+        base_signals = cursor.fetchall()
+        if base_signals:
+            base_text += "\n\nBase Signals:\n"
+            base_text += "\n".join(
+                f"[{r[2]}] {r[3]} | {r[1]} | {r[4]}"
+                for r in base_signals
+            )
+
         return (
             "=== PRICES ===\n"
             f"{prices_text}\n\n"
             "=== WHALES ===\n"
             f"{whales_text}\n\n"
             "=== NEWS ===\n"
-            f"{news_text}"
+            f"{news_text}\n\n"
+            "=== POLKADOT ===\n"
+            f"{polkadot_text}\n\n"
+            "=== BASE ===\n"
+            f"{base_text}"
         )
     finally:
         cursor.close()
@@ -121,7 +182,7 @@ async def call_cerebras(client: httpx.AsyncClient, prompt: str, system_instructi
             "Content-Type": "application/json",
         },
         json={
-            "model": "qwen3-coder",
+            "model": "gpt-oss-120b",
             "messages": [
                 {"role": "system", "content": system_instruction},
                 {"role": "user", "content": prompt},
@@ -195,7 +256,7 @@ async def call_openrouter(client: httpx.AsyncClient, prompt: str, system_instruc
             "X-OpenRouter-Title": "AsyncSignals",
         },
         json={
-            "model": "openrouter/free",
+            "model": "google/gemma-4-31b-it:free",
             "messages": [
                 {"role": "system", "content": system_instruction},
                 {"role": "user", "content": prompt},
@@ -247,6 +308,18 @@ def build_rule_based_summary(context: str, asset: str) -> str:
             "remain active while language-model providers recover. Review live wallet flow, token activity, and "
             "headline context directly in the dashboard."
         )
+    if asset == "DOT":
+        return (
+            "DOT summary is running on fallback mode. Polkadot parachain telemetry, staking data, treasury flows, "
+            "and XCM cross-chain activity remain active. Review the Polkadot tab for live chain activity, "
+            "governance signals, and validator economics."
+        )
+    if asset == "BASE":
+        return (
+            "Base summary is running on fallback mode. Base L2 chain activity, whale transfers, gas metrics, "
+            "and DEX/bridge signals remain active. Review the Base L2 tab for live sequencer throughput, "
+            "builder velocity, and fee pressure indicators."
+        )
     return (
         f"{asset} summary is temporarily running on fallback mode. Core telemetry remains active even though "
         f"language-model providers are currently unavailable."
@@ -261,7 +334,7 @@ async def generate_summary(client: httpx.AsyncClient, context: str, asset: str) 
         f"Do not use hype, emojis, or markdown bullets. Be direct and analytical."
     )
 
-    prompt = f"Create a summary for {asset} using this market context:\n\n{context}"
+    prompt = f"Create a summary for {asset} using this multi-chain market context:\n\n{context}"
 
     providers: list[tuple[str, Callable[..., Awaitable[str]]]] = [
         ("Groq", call_groq),
@@ -279,6 +352,7 @@ async def generate_summary(client: httpx.AsyncClient, context: str, asset: str) 
                 return summary.strip()
         except Exception as e:
             print(f"{name} failed for {asset}: {sanitize_error_message(e)}")
+        await asyncio.sleep(1.5)
 
     return build_rule_based_summary(context, asset)
     
@@ -319,10 +393,14 @@ async def main():
     async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
         btc_summary = await generate_summary(client, context, "BTC")
         sol_summary = await generate_summary(client, context, "SOL")
+        dot_summary = await generate_summary(client, context, "DOT")
+        base_summary = await generate_summary(client, context, "BASE")
 
     rows = [
         {"asset": "BTC", "summary": btc_summary, "timestamp": utc_now_str()},
         {"asset": "SOL", "summary": sol_summary, "timestamp": utc_now_str()},
+        {"asset": "DOT", "summary": dot_summary, "timestamp": utc_now_str()},
+        {"asset": "BASE", "summary": base_summary, "timestamp": utc_now_str()},
     ]
 
     save_summaries(rows)
