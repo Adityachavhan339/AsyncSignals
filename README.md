@@ -1,143 +1,186 @@
 # AsyncSignals
 
-Multi-chain telemetry and market intelligence for teams, analysts, and ecosystem operators. Turns raw onchain activity into structured signals, live dashboards, and reusable API context.
+Multi-chain telemetry and market intelligence for teams, analysts, and ecosystem operators. AsyncSignals turns raw onchain activity into structured signals, live dashboards, and reusable API context.
 
-Supported chains: Solana, EVM, Base L2, Polkadot.
+**Supported chains:** Solana, EVM, Base L2, Polkadot.
 
----
-##Technical Flowchart##
-<img width="1536" height="1024" alt="1000062409" src="https://github.com/user-attachments/assets/e53d4600-fa1b-456e-ad35-a0d0707bc4e4" />
-
-
-
-## What it does
-
-- **Live market data** — prices, market cap, 24h change from CoinGecko and CoinPaprika.
-- **Whale flow tracking** — detects large transfers across Solana, EVM, and Base L2, normalizes to USD, stores in Oracle.
-- **Signal generation** — execution-oriented alerts: danger, opportunity, volatility, SOL flow, based on price + whale + news context.
-- **AI summaries** — LLM-generated market context for BTC, SOL, DOT, and Base L2 from stored telemetry.
-- **Public API** — FastAPI with 17 endpoints, JSON + text formats, CORS-enabled, rate-limited via Nginx.
-- **Streamlit dashboard** — mission control, whale tracker, signal ledger, AI context, chain-specific tabs.
-
----
 
 ## Live
 
-- Dashboard: [https://asyncsignals.tech]
-- API: [https://api.asyncsignals.tech/docs]
-- API root: `curl https://api.asyncsignals.tech/`
-
----
+- **Dashboard:** [https://asyncsignals.tech](https://asyncsignals.tech)
+- **API:** [https://api.asyncsignals.tech](https://api.asyncsignals.tech)
+- **API Docs:** [https://api.asyncsignals.tech/docs](https://api.asyncsignals.tech/docs)
 
 ## Acknowledgements
+Supported by the Alchemy Solana Fund.
 
-Supported by the [Alchemy Solana Fund](https://www.alchemy.com/solana-20m-fund).
 
----
-
-## Repository
+## Repository Structure
 
 ```text
 asyncsignals/
-├── app.py              # Streamlit dashboard
-├── api.py              # FastAPI public API
-├── function_app.py     # Core ingestion worker (prices, whales, news, signals)
-├── base.py             # Base L2 collector (blocks, gas, transfers, DEX, bridge)
-├── polkadot.py         # Polkadot collector (parachains, XCM, gov, staking)
-├── asyncllm.py         # AI summary worker (BTC, SOL, DOT, Base)
-├── requirements.txt
-├── .env.example
-└── README.md
+├── backend/                    # Python data pipeline & API
+│   ├── api.py                  # FastAPI public API
+│   ├── function_app.py         # Core ingestion (prices, whales, news, signals)
+│   ├── base.py                 # Base L2 collector
+│   ├── polkadot.py             # Polkadot parachain telemetry
+│   ├── asyncllm.py             # AI summary generation
+│   ├── app.py                  # Streamlit dashboard (legacy)
+│   └── requirements.txt
+│
+├── frontend/                   # Next.js 14 dashboard
+│   ├── src/                    # React components & pages
+│   ├── package.json
+│   ├── next.config.mjs
+│   └── tailwind.config.ts
 ```
 
----
+## What It Does
 
-## Core features
+- **Live market data** — prices, market cap, and 24h change from CoinGecko and CoinPaprika.
+- **Whale flow tracking** — detects large transfers across Solana, EVM, and Base L2, normalizes them to USD, and stores them in Oracle.
+- **Signal generation** — execution-oriented alerts such as danger, opportunity, volatility, and SOL flow based on price, whale, and news context.
+- **AI summaries** — LLM-generated market context for BTC, SOL, DOT, and Base L2 from stored telemetry.
+- **Public API** — FastAPI with JSON and text responses, CORS enabled, and proxy-layer rate limiting.
+- **Next.js dashboard** — mission control for whale tracking, signal history, AI context, and chain-specific views.
 
-| Feature | Description |
-|---|---|
-| Dashboard | Multi-tab Streamlit: market, whales, signals, AI summaries, Polkadot, Base L2, alerts. |
-| Public API | 17 endpoints: `/market`, `/whales`, `/signals`, `/polkadot`, `/base`, `/bundle`, etc. |
-| Whale flow | Solana (RPC), EVM (Alchemy), Base L2 (5 RPC providers). Normalized to USD. |
-| Signal engine | Danger / opportunity / volatility alerts based on price + whale + news. |
-| AI summaries | Multi-provider LLM fallback (Groq, Cerebras, OpenRouter, Gemini). |
-| Chain telemetry | Polkadot: parachain activity, XCM, governance, staking. Base L2: sequencer, gas, DEX, bridge. |
-| Alert routing | Telegram bot for subscriber notifications. |
+## Backend Services
 
----
+| File | Purpose | Schedule |
+|------|---------|----------|
+| `function_app.py` | Core ingestion for prices, whales, news, and signals | Every 5 min |
+| `base.py` | Base L2 collector for blocks, gas, transfers, DEX, and bridge activity | Every 5 min |
+| `polkadot.py` | Polkadot telemetry for parachains, XCM, governance, and staking | Every 5 min |
+| `asyncllm.py` | AI summaries for BTC, SOL, DOT, and Base | Every 2 hours |
+| `api.py` | FastAPI public API | Always on |
+
+## Frontend Stack
+
+- **Framework:** Next.js 14
+- **Styling:** Tailwind CSS
+- **Auth:** NextAuth.js with Google OAuth
+- **Charts:** Recharts / Plotly
+- **Deployment:** PM2 cluster with Nginx load balancing
+
+## Technology Stack
+
+| Layer | Technology | Purpose |
+|-------|------------|---------|
+| Data Sources | CoinGecko, CoinPaprika, Alchemy, Helius, Dotlake, NewsData | Market and onchain data |
+| Workers | Python 3.12, httpx, asyncio, oracledb | Data ingestion |
+| Database | Oracle 26ai Autonomous | Persistent storage |
+| API | FastAPI, uvicorn, pydantic | Public REST API |
+| Frontend | Next.js 14, React, Tailwind, NextAuth | Dashboard |
+| Reverse Proxy | Nginx, Let's Encrypt | SSL and load balancing |
+| Process Management | systemd, PM2 | Auto-restart and clustering |
+| Infrastructure | Oracle Cloud Ampere A1 | 2 OCPU, 12 GB RAM, 2 Gbps |
+
+## Performance
+
+| Metric | Value |
+|--------|-------|
+| API sustained RPS | 300 req/s |
+| API burst RPS | 800 req/s |
+| Concurrent users | 150 |
+
+## Security
+
+- TLS via Let's Encrypt
+- Oracle Wallet for DB authentication
+- NextAuth.js with Google OAuth
+- Rate limiting via Nginx
+- CORS enabled for API
 
 ## Setup
 
+### 1. Clone the repository
+
 ```bash
-git clone https://github.com/Adityachavhan339/asyncsignals.git
-cd asyncsignals
+git clone https://github.com/Adityachavhan339/AsyncSignals.git
+cd AsyncSignals
+```
+
+### 2. Backend setup
+
+```bash
+cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# Edit .env with your credentials
 ```
 
----
+Edit `.env` with your credentials.
 
-## Environment
+### 3. Frontend setup
 
-Required variables (see `.env.example` for full list):
+```bash
+cd ../frontend
+npm install
+cp .env.local.example .env.local
+```
 
-- Oracle DB: `DB_USER`, `DB_PASSWORD`, `DB_DSN`, `WALLET_DIR`
-- Market data: `COINGECKO_KEY`, `NEWSDATA_KEY`
-- Onchain: `ALCHEMY_KEY`, `SOLANA_DRPC_URL`, `HELIUS_API_KEY`
-- Polkadot: `DOTLAKE_API_PARITY_KEY`, `PUBLICNODE_POLKADOT_URL`
-- AI: `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`
-- Alerts: `TELEGRAM_BOT_TOKEN`
+Edit `.env.local` with your API URLs.
 
----
+## Environment Variables
+
+Required variables include:
+
+- **Oracle DB:** `DB_USER`, `DB_PASSWORD`, `DB_DSN`, `WALLET_DIR`
+- **Market data:** `COINGECKO_KEY`, `NEWSDATA_KEY`
+- **Onchain:** `ALCHEMY_KEY`, `SOLANA_DRPC_URL`, `HELIUS_API_KEY`
+- **Polkadot:** `DOTLAKE_API_PARITY_KEY`, `PUBLICNODE_POLKADOT_URL`
+- **AI:** `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`
+- **Alerts:** `TELEGRAM_BOT_TOKEN`
+
+See `backend/.env.example` for the full list.
 
 ## Run
 
-### Dashboard
+### Backend API
+
 ```bash
-streamlit run app.py
+cd backend
+source .venv/bin/activate
+uvicorn api:app --host 0.0.0.0 --port 8000 --workers 4
 ```
 
-### API
+### Frontend
+
 ```bash
-uvicorn api:app --host 0.0.0.0 --port 8000 --workers 2
+cd frontend
+npm run dev
+npm run build
+npm start
 ```
 
-### Workers (cron)
+### Workers
+
 ```bash
-# Core ingestion — every 5 minutes
+cd backend
 python function_app.py
-
-# Base L2 — every 5 minutes (offset +1)
 python base.py
-
-# Polkadot — every 5 minutes (offset +2)
 python polkadot.py
-
-# AI summaries — every 2 hours
 python asyncllm.py
 ```
 
----
-
 ## Architecture
 
+```text
+External sources -> Workers -> Oracle DB -> Nginx -> Next.js / FastAPI
 ```
-External sources → Workers → Oracle DB → Nginx → Streamlit / FastAPI
-```
 
-- **Workers**: 4 cron-scheduled Python processes (function_app, base, polkadot, asyncllm).
-- **Database**: Oracle Cloud 26ai Always Free (14+ tables).
-- **API**: FastAPI with RAM cache, auto-refresh, 500+ RPS cached.
-- **Dashboard**: Streamlit with hosted auth, multi-tab, exportable tables.
-- **Infra**: Oracle VM, Nginx reverse proxy, Let's Encrypt SSL, systemd auto-restart.
 
----
+- **Database:** Oracle Cloud 26ai Always Free
+- **API:** FastAPI with RAM cache, auto-refresh, and proxy-layer controls
+- **Dashboard:** Next.js 14 with SSR, PM2 cluster, and Nginx load balancing
+- **Infra:** Oracle VM, Nginx reverse proxy, Let's Encrypt SSL, and service auto-restart
 
-## Product direction
 
-Built as developer-facing telemetry infrastructure, not a retail trading tool. Target: research teams, ecosystem operators, analysts, and builders who need clean onchain signal data.
+## Product Direction
 
-Open source under Apache 2.0.
+AsyncSignals is built as developer-facing telemetry infrastructure, not a retail trading tool. It is designed for research teams, ecosystem operators, analysts, and builders who need clean, reusable onchain signal data.
+
+## License
+
+Apache 2.0
