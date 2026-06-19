@@ -4,6 +4,10 @@ Multi-chain telemetry and market intelligence for teams, analysts, and ecosystem
 
 **Supported chains:** Solana, EVM, Base L2, Polkadot.
 
+## Architecture
+<img width="1536" height="1024" alt="1000062461" src="https://github.com/user-attachments/assets/5f882e9a-05e9-47db-8d67-48499e6fb681" />
+
+
 
 ## Live
 
@@ -46,13 +50,13 @@ asyncsignals/
 
 ## Backend Services
 
-| File | Purpose | Schedule |
+| File | Purpose |
 |------|---------|----------|
-| `function_app.py` | Core ingestion for prices, whales, news, and signals | Every 5 min |
-| `base.py` | Base L2 collector for blocks, gas, transfers, DEX, and bridge activity | Every 5 min |
-| `polkadot.py` | Polkadot telemetry for parachains, XCM, governance, and staking | Every 5 min |
-| `asyncllm.py` | AI summaries for BTC, SOL, DOT, and Base | Every 2 hours |
-| `api.py` | FastAPI public API | Always on |
+| `function_app.py` | Core ingestion for prices, whales, news, and signals |
+| `base.py` | Base L2 collector for blocks, gas, transfers, DEX, and bridge activity |
+| `polkadot.py` | Polkadot telemetry for parachains, XCM, governance, and staking |
+| `asyncllm.py` | AI summaries for BTC, SOL, DOT, and Base |
+| `api.py` | FastAPI public API |
 
 ## Frontend Stack
 
