@@ -56,6 +56,78 @@ export async function fetchBase() {
   return res.json();
 }
 
+export async function fetchSpot() {
+  const res = await fetch(`${API_URL}/spot`, {
+    next: { revalidate: 60 },
+  });
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
+// ── Sui endpoints ──
+export async function fetchSuiWhales(limit = 50, protocol?: string) {
+  const url = new URL(`${API_URL}/sui/whale-transfers`);
+  url.searchParams.set("limit", String(limit));
+  if (protocol) url.searchParams.set("protocol", protocol);
+  const res = await fetch(url.toString(), { next: { revalidate: 60 } });
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchSuiTopWhales(limit = 50, window = "7d") {
+  const res = await fetch(`${API_URL}/sui/top-whales?limit=${limit}&window=${window}`, {
+    next: { revalidate: 60 },
+  });
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchSuiProtocolExposure() {
+  const res = await fetch(`${API_URL}/sui/protocol-exposure`, {
+    next: { revalidate: 120 },
+  });
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchSuiSummary() {
+  const res = await fetch(`${API_URL}/sui/summary`, {
+    next: { revalidate: 120 },
+  });
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
+// ── NodeOps endpoints ──
+export async function fetchNodeOpsMetrics(nodeId?: string, window = 24, limit = 100) {
+  const url = new URL(`${API_URL}/api/v1/nodeops/metrics`);
+  if (nodeId) url.searchParams.set("node_id", nodeId);
+  url.searchParams.set("window", String(window));
+  url.searchParams.set("limit", String(limit));
+  const res = await fetch(url.toString(), { next: { revalidate: 60 } });
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchNodeOpsHealth() {
+  const res = await fetch(`${API_URL}/api/v1/nodeops/health`, {
+    next: { revalidate: 60 },
+  });
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
+export async function postNodeOpsTelemetry(payload: Record<string, any>) {
+  const res = await fetch(`${API_URL}/api/v1/nodeops/telemetry`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
+// ── Utilities ──
 export function fmtUsd(value: number | null | undefined): string {
   if (value == null) return "n/a";
   const num = Number(value);
