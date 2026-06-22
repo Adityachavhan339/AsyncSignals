@@ -64,6 +64,16 @@ export async function fetchSpot() {
   return res.json();
 }
 
+// ── BNB Chain endpoints ──
+export async function fetchBnb(whaleLimit = 50, poolLimit = 50, derivedLimit = 25) {
+  const res = await fetch(
+    `${API_URL}/bnb?whale_limit=${whaleLimit}&pool_limit=${poolLimit}&derived_limit=${derivedLimit}`,
+    { next: { revalidate: 60 } }
+  );
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
 // ── Sui endpoints ──
 export async function fetchSuiWhales(limit = 50, protocol?: string) {
   const url = new URL(`${API_URL}/sui/whale-transfers`);
