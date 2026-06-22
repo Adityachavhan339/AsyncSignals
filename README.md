@@ -2,13 +2,13 @@
 
 Multi-chain telemetry and market intelligence for teams, analysts, and ecosystem operators. AsyncSignals turns raw onchain activity into structured signals, live dashboards, and reusable API context.
 
-**Supported chains:** Solana, EVM, Base L2, Polkadot, Sui.
+**Supported chains:** Solana, EVM, Base L2, BNB Chain (BSC), Polkadot, Sui.
 
 ---
 
 ## Architecture
 
-<img width="1402" height="1122" alt="1000062575" src="https://github.com/user-attachments/assets/bd622607-b166-4441-ac76-a554aa282575" />
+<img width="1376" height="1143" alt="1000062621" src="https://github.com/user-attachments/assets/be455670-c0b1-42a1-82f2-c00172f9fe11" />
 
 
 External Sources → Python Workers → Oracle DB → FastAPI → Next.js Dashboard
@@ -31,8 +31,8 @@ Supported by the Alchemy Solana Fund.
 
 ## What It Does
 
-- Multi-chain real-time market + onchain data aggregation  
-- Whale tracking across Solana, EVM, Base L2, Sui  
+- Multi-chain real-time market + onchain data aggregation (Solana, EVM, Base L2, BNB, Polkadot, Sui)  
+- Whale tracking across all supported chains  
 - Execution-level signal generation (DANGER / OPPORTUNITY / VOLATILITY)  
 - AI-powered cross-chain intelligence summaries  
 - NodeOps infrastructure monitoring + diagnostics  
@@ -47,6 +47,7 @@ Supported by the Alchemy Solana Fund.
 |------|---------|
 | `function_app.py` | Core ingestion pipeline (prices, whales, news, signals) |
 | `base.py` | Base L2 telemetry (gas, DEX, bridges, whale flows) |
+| `bnb.py` | BNB Chain (BSC) telemetry (whales, pools, gas, validators, risk, signals) |
 | `polkadot.py` | Polkadot governance, staking, XCM, validator analytics |
 | `sui.py` | Sui Move ecosystem telemetry (protocols, whales, objects, exposure) |
 | `nodeops_telemetry.py` | Node health monitoring, runbooks, error classification, metrics |
@@ -63,6 +64,17 @@ Supported by the Alchemy Solana Fund.
 - Whale detection + bridge flow analysis
 - DEX activity tracking (Aerodrome)
 - **Purpose:** Detect liquidity shifts, congestion spikes, and whale-driven volatility
+
+---
+
+### BNB Chain (bnb.py)
+- BSC RPC ingestion (Dwellir, Ankr, Infura, Alchemy BSC)
+- Whale tracking + transfer monitoring
+- DEX pool analytics (GeckoTerminal)
+- Gas tracking + network risk scoring
+- Validator snapshot monitoring
+- Derived signal generation
+- **Purpose:** Track BNB Chain liquidity flows, whale activity, and network risk signals
 
 ---
 
@@ -91,14 +103,14 @@ Supported by the Alchemy Solana Fund.
 - Severity scoring (critical / warning / healthy)
 - CSV export for ops + finance teams
 - Demo data generator for testing
-- **Purpose:** Provide production-grade infrastructure observability and failure diagnostics
+- **Purpose:** Production-grade infrastructure observability and failure diagnostics
 
 ---
 
 ### AI Layer (asyncllm.py)
 - Multi-provider fallback LLM system (Groq, Cerebras, OpenRouter, Gemini, Cloudflare)
 - Cross-chain context fusion (prices + whales + news + telemetry)
-- Asset intelligence summaries (BTC, SOL, DOT, BASE, SUI, NODEOPS)
+- Asset intelligence summaries (BTC, SOL, DOT, BASE, SUI, BNB, NODEOPS)
 - Oracle-persisted AI outputs
 - **Purpose:** Convert raw telemetry into structured market intelligence
 
@@ -109,6 +121,14 @@ Supported by the Alchemy Solana Fund.
 - 120s RAM cache system for performance
 - CORS enabled for dashboard + external integrations
 - AI-assisted Solana error decoder
+- BNB Chain endpoints:
+  - /bnb
+  - /bnb/whales
+  - /bnb/pools
+  - /bnb/risk
+  - /bnb/validators
+  - /bnb/gas
+  - /bnb/signals
 - **Purpose:** Unified high-performance data + intelligence serving layer
 
 ---
@@ -129,14 +149,14 @@ Supported by the Alchemy Solana Fund.
 
 | Layer | Technology | Purpose |
 |------|------------|----------|
-| Data Sources | CoinGecko, CoinPaprika, Alchemy, Helius, Ankr, DotLake, NewsData | Market + onchain + news ingestion |
+| Data Sources | CoinGecko, CoinPaprika, Alchemy, Helius, Ankr, DotLake, NewsData, BNB RPC providers | Market + onchain + news ingestion |
 | Workers | Python 3.12, asyncio, httpx | High-frequency async data ingestion |
 | Database | Oracle Autonomous DB 26ai | Persistent telemetry + signals storage |
 | API Layer | FastAPI, uvicorn, pydantic | High-performance REST + cached APIs |
 | Frontend | Next.js 14, React, Tailwind CSS | Real-time analytics dashboard |
 | Infrastructure | Oracle Cloud Ampere A1 VM | Scalable compute for workers + API |
 | Process Management | systemd + PM2 | Auto-restart + production reliability |
-| Reverse Proxy | Nginx + Let’s Encrypt | SSL termination + rate limiting + routing |
+| Reverse Proxy | Nginx + Let’s Encrypt | SSL termination + routing |
 
 ---
 
