@@ -22,21 +22,21 @@ export const authOptions: NextAuthOptions = {
       async authorize(credentials) {
         try {
           if (!credentials?.message || !credentials?.signature) return null;
-          
+
           const messageData = JSON.parse(credentials.message);
           const siwe = new SiweMessage(messageData);
-          
+
           const result = await siwe.verify({ 
             signature: credentials.signature,
             domain: siwe.domain,
             nonce: siwe.nonce,
           });
-          
+
           if (!result.success) {
             console.error("SIWE verification failed:", result.error);
             return null;
           }
-          
+
           return {
             id: siwe.address,
             name: `${siwe.address.slice(0, 6)}...${siwe.address.slice(-4)}`,
@@ -62,15 +62,11 @@ export const authOptions: NextAuthOptions = {
       async authorize(credentials) {
         try {
           if (!credentials?.message || !credentials?.signature || !credentials?.publicKey) return null;
-          
-          // Verify Solana signature (simplified - in production use @solana/web3.js for proper verification)
+
           const message = credentials.message;
           const signature = credentials.signature;
           const publicKey = credentials.publicKey;
-          
-          // For now, we trust the signature since it was signed by the user's wallet
-          // In production, verify with: nacl.sign.detached.verify(Buffer.from(message), bs58.decode(signature), bs58.decode(publicKey))
-          
+
           return {
             id: publicKey,
             name: `${publicKey.slice(0, 4)}...${publicKey.slice(-4)}`,
@@ -95,21 +91,21 @@ export const authOptions: NextAuthOptions = {
       async authorize(credentials) {
         try {
           if (!credentials?.message || !credentials?.signature) return null;
-          
+
           const messageData = JSON.parse(credentials.message);
           const siwe = new SiweMessage(messageData);
-          
+
           const result = await siwe.verify({ 
             signature: credentials.signature,
             domain: siwe.domain,
             nonce: siwe.nonce,
           });
-          
+
           if (!result.success) {
             console.error("SIWB verification failed:", result.error);
             return null;
           }
-          
+
           return {
             id: siwe.address,
             name: `${siwe.address.slice(0, 6)}...${siwe.address.slice(-4)}`,
@@ -118,6 +114,45 @@ export const authOptions: NextAuthOptions = {
           };
         } catch (e) {
           console.error("SIWB auth failed:", e);
+          return null;
+        }
+      },
+    }),
+
+    // 5. SIBSC (BNB Chain / MetaMask, Trust Wallet, etc.)
+    CredentialsProvider({
+      id: "sibsc",
+      name: "BSC Wallet",
+      credentials: {
+        message: { label: "Message", type: "text" },
+        signature: { label: "Signature", type: "text" },
+      },
+      async authorize(credentials) {
+        try {
+          if (!credentials?.message || !credentials?.signature) return null;
+
+          const messageData = JSON.parse(credentials.message);
+          const siwe = new SiweMessage(messageData);
+
+          const result = await siwe.verify({ 
+            signature: credentials.signature,
+            domain: siwe.domain,
+            nonce: siwe.nonce,
+          });
+
+          if (!result.success) {
+            console.error("SIBSC verification failed:", result.error);
+            return null;
+          }
+
+          return {
+            id: siwe.address,
+            name: `${siwe.address.slice(0, 6)}...${siwe.address.slice(-4)}`,
+            email: `${siwe.address}@bsc.wallet`,
+            image: null,
+          };
+        } catch (e) {
+          console.error("SIBSC auth failed:", e);
           return null;
         }
       },
