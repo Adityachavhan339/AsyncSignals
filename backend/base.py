@@ -1,7 +1,3 @@
-"""
-base.py — AsyncSignals Base Chain Telemetry Collector
-"""
-
 import asyncio
 import math
 import os
@@ -30,6 +26,21 @@ BASE_ALCHEMY_URL = f"https://base-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}" if ALC
 
 TS_FORMAT = "%Y-%m-%d %H:%M:%S"
 MAX_DERIVED_SIGNALS = 40
+
+# ─── Token pricing whitelist ──────────────────────────────────────────────
+# Only tokens we can reliably price. Everything else is skipped.
+KNOWN_NATIVE = {"ETH", "BASE"}
+KNOWN_WRAPPED = {"WETH", "WBTC", "CBETH"}
+KNOWN_STABLES = {"USDC", "USDT", "DAI", "USDE", "PYUSD", "USDZ", "AUSD"}
+TRACKED_TOKENS = KNOWN_NATIVE | KNOWN_WRAPPED | KNOWN_STABLES
+
+# CoinGecko ID mapping for price lookups
+COINGECKO_IDS = {
+    "ETH": "ethereum",
+    "WETH": "weth",
+    "WBTC": "wrapped-bitcoin",
+    "CBETH": "coinbase-wrapped-staked-eth",
+}
 
 
 def get_connection():
@@ -268,6 +279,27 @@ async def fetch_coingecko_eth_price(client: httpx.AsyncClient) -> Optional[float
         return None
 
 
+async def fetch_coingecko_prices(client: httpx.AsyncClient, ids: List[str]) -> Dict[str, float]:
+    """Fetch USD prices for multiple CoinGecko IDs. Returns {id: price}."""
+    if not COINGECKO_KEY or not ids:
+        return {}
+    try:
+        headers = {"x-cg-demo-api-key": COINGECKO_KEY}
+        ids_str = ",".join(ids)
+        resp = await client.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": ids_str, "vs_currencies": "usd"},
+            headers=headers,
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return {k: v.get("usd") for k, v in data.items() if v and v.get("usd")}
+    except Exception as e:
+        log(f"CoinGecko batch price fetch failed: {e}")
+        return {}
+
+
 async def fetch_alchemy_block_data(client: httpx.AsyncClient) -> Dict[str, Any]:
     log("Fetching Alchemy Base block data")
     block_num_hex = await alchemy_post(client, {"method": "eth_blockNumber", "params": []})
@@ -406,9 +438,28 @@ async def fetch_blockreq_dex_logs(client: httpx.AsyncClient, from_block: str, to
 
 
 async def fetch_alchemy_whales(client: httpx.AsyncClient, eth_price: float) -> List[BaseTransferSignal]:
+    """
+    Fetch whale transfers from Alchemy.
+    Only tracks tokens with known prices. Skips unknown ERC-20s to avoid
+    fake 'trillion dollar' values from meme coins with massive supply.
+    """
     log("Fetching Alchemy Base whales")
     if not ALCHEMY_KEY:
         return []
+
+    # Fetch wrapped token prices (WBTC, etc.) in one call
+    cg_ids = [COINGECKO_IDS.get(t) for t in KNOWN_WRAPPED if COINGECKO_IDS.get(t)]
+    cg_prices = await fetch_coingecko_prices(client, cg_ids)
+    token_prices = {
+        "ETH": eth_price,
+        "WETH": eth_price,
+        "BASE": eth_price,
+    }
+    for token, cg_id in COINGECKO_IDS.items():
+        price = cg_prices.get(cg_id)
+        if price:
+            token_prices[token] = price
+
     latest_resp = await alchemy_post(client, {"method": "eth_blockNumber", "params": []})
     latest_num = int(latest_resp, 16)
     from_num = max(latest_num - 600, 0)
@@ -430,26 +481,49 @@ async def fetch_alchemy_whales(client: httpx.AsyncClient, eth_price: float) -> L
     resp.raise_for_status()
     data = resp.json()
     transfers = data.get("result", {}).get("transfers", [])
+
     whale_data = []
+    skipped_unknown = 0
+    skipped_small = 0
+
     for tx in transfers:
         asset = str(tx.get("asset", "")).upper().strip() or "ETH"
+
+        # ─── SKIP unknown tokens ─────────────────────────────────────────
+        if asset not in TRACKED_TOKENS:
+            skipped_unknown += 1
+            continue
+
         amount = float(tx.get("value") or 0)
-        if asset in ["ETH", "WETH", "BASE"]:
-            usd_value = amount * eth_price
+
+        # ─── Calculate USD value ─────────────────────────────────────────
+        if asset in KNOWN_STABLES:
+            usd_value = amount  # 1:1 peg assumption
+        elif asset in KNOWN_NATIVE or asset in KNOWN_WRAPPED:
+            token_price = token_prices.get(asset, eth_price)
+            usd_value = amount * token_price
         else:
-            usd_value = amount * 1.0
-        valid = (asset in ["ETH", "WETH", "BASE"] and amount >= 2) or (usd_value >= 15000)
-        if valid:
-            whale_data.append(BaseTransferSignal(
-                timestamp=str(tx.get("metadata", {}).get("blockTimestamp") or utc_now_str()),
-                asset_symbol=asset,
-                value_usd=round(usd_value, 2) if usd_value > 0 else None,
-                from_address=str(tx.get("from", "Unknown")),
-                to_address=str(tx.get("to", "Unknown")),
-                tx_hash=str(tx.get("hash", "Unknown")),
-                block_number=as_int(tx.get("blockNum")),
-                transfer_type=str(tx.get("category", "external")).lower(),
-            ))
+            # Shouldn't reach here, but safety fallback
+            skipped_unknown += 1
+            continue
+
+        # ─── Whale threshold: $15,000 minimum ────────────────────────────
+        if usd_value < 15000:
+            skipped_small += 1
+            continue
+
+        whale_data.append(BaseTransferSignal(
+            timestamp=str(tx.get("metadata", {}).get("blockTimestamp") or utc_now_str()),
+            asset_symbol=asset,
+            value_usd=round(usd_value, 2) if usd_value > 0 else None,
+            from_address=str(tx.get("from", "Unknown")),
+            to_address=str(tx.get("to", "Unknown")),
+            tx_hash=str(tx.get("hash", "Unknown")),
+            block_number=as_int(tx.get("blockNum")),
+            transfer_type=str(tx.get("category", "external")).lower(),
+        ))
+
+    # Deduplicate
     seen = set()
     unique = []
     for w in sorted(whale_data, key=lambda x: x.value_usd or 0, reverse=True):
@@ -457,6 +531,8 @@ async def fetch_alchemy_whales(client: httpx.AsyncClient, eth_price: float) -> L
         if key not in seen:
             seen.add(key)
             unique.append(w)
+
+    log(f"Whales: {len(unique)} tracked, {skipped_unknown} unknown tokens skipped, {skipped_small} below threshold skipped")
     return unique[:60]
 
 
