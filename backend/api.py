@@ -7,20 +7,25 @@ from datetime import date, datetime
 from threading import Lock
 from typing import Any, Dict, List, Optional
 import httpx
+import io
+from datetime import timedelta
 
 import oracledb
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException, Path, Query
+from fastapi import FastAPI, Header, HTTPException, Path, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 load_dotenv()
 
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_DSN = os.getenv("DB_DSN", "asyncsignalsdatabase_high")
-WALLET_DIR = os.getenv("WALLET_DIR", "/home/daniel/wallet")
+DB_DSN = os.getenv("DB_DSN", "asyncsignalsdatabase_low")
+WALLET_DIR = os.getenv("WALLET_DIR", "/home/ubuntu/wallet")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -75,14 +80,17 @@ POLKADOT_TABLES = [
     "POLKADOT_XCM_TRANSFER_SIGNALS",
 ]
 
+limiter = Limiter(key_func=get_remote_address, default_limits=["20/minute"])
 app = FastAPI(
     title=APP_TITLE,
     version=APP_VERSION,
     description=(
         "AsyncSignals B2B telemetry API with startup RAM cache, timed auto-refresh, "
-        "shared asset endpoints, and dedicated Polkadot analytics routes."
+        "shared asset endpoints, dedicated Polkadot analytics routes, and BNB Chain support."
     ),
 )
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 allow_origins = [x.strip() for x in os.getenv("CORS_ALLOW_ORIGINS", "*").split(",") if x.strip()]
 app.add_middleware(
@@ -649,6 +657,111 @@ def fetch_polkadot_data(
     }
 
 
+def fetch_bnb_rpc_snapshot() -> List[Dict[str, Any]]:
+    if not table_exists("BNB_RPC_SNAPSHOT"):
+        return []
+    return run_query("""
+        SELECT captured_at, latest_block_number, latest_block_hash, latest_block_timestamp,
+               avg_block_time_seconds, tps_1min, gas_used_total, gas_price_gwei, tx_count, validator_address
+        FROM BNB_RPC_SNAPSHOT
+        ORDER BY captured_at DESC
+        FETCH FIRST 1 ROWS ONLY
+    """)
+
+
+def fetch_bnb_whales(limit: int = 50) -> List[Dict[str, Any]]:
+    if not table_exists("BNB_WHALE_EVENTS"):
+        return []
+    limit = safe_limit(limit, 50, max_value=200)
+    return run_query(f"""
+        SELECT timestamp, asset_symbol, token_contract, value_raw, value_usd,
+               from_address, to_address, tx_hash, block_number, transfer_type
+        FROM BNB_WHALE_EVENTS
+        ORDER BY timestamp DESC
+        FETCH FIRST {limit} ROWS ONLY
+    """)
+
+
+def fetch_bnb_pools(limit: int = 50) -> List[Dict[str, Any]]:
+    if not table_exists("BNB_DEX_POOLS_DAILY"):
+        return []
+    limit = safe_limit(limit, 50, max_value=200)
+    return run_query(f"""
+        SELECT snapshot_date, pool_id, token0_symbol, token1_symbol, token0_contract, token1_contract,
+               tvl_usd, volume_24h_usd, tx_count_24h, token0_price, token1_price, price_change_24h
+        FROM BNB_DEX_POOLS_DAILY
+        ORDER BY tvl_usd DESC NULLS LAST
+        FETCH FIRST {limit} ROWS ONLY
+    """)
+
+
+def fetch_bnb_risk_scores(limit: int = 50) -> List[Dict[str, Any]]:
+    if not table_exists("BNB_YIELD_RISK_SCORES"):
+        return []
+    limit = safe_limit(limit, 50, max_value=200)
+    return run_query(f"""
+        SELECT score_date, pool_id, pool_name, risk_score, risk_flag, explanation,
+               tvl_change_24h, whale_net_flow, volatility_flag, computed_at
+        FROM BNB_YIELD_RISK_SCORES
+        ORDER BY risk_score DESC
+        FETCH FIRST {limit} ROWS ONLY
+    """)
+
+
+def fetch_bnb_validators(limit: int = 50) -> List[Dict[str, Any]]:
+    if not table_exists("BNB_VALIDATOR_SNAPSHOT"):
+        return []
+    limit = safe_limit(limit, 50, max_value=200)
+    return run_query(f"""
+        SELECT captured_at, block_number, validator_address, validator_name,
+               missed_blocks_count, staking_apr, is_active
+        FROM BNB_VALIDATOR_SNAPSHOT
+        ORDER BY captured_at DESC
+        FETCH FIRST {limit} ROWS ONLY
+    """)
+
+
+def fetch_bnb_gas_forecast() -> List[Dict[str, Any]]:
+    if not table_exists("BNB_GAS_FORECAST"):
+        return []
+    return run_query("""
+        SELECT forecast_at, current_gas_price_gwei, avg_gas_50_blocks, std_dev_gas,
+               forecast_1h_gwei, congestion_level
+        FROM BNB_GAS_FORECAST
+        ORDER BY forecast_at DESC
+        FETCH FIRST 1 ROWS ONLY
+    """)
+
+
+def fetch_bnb_derived(limit: int = DEFAULT_POLKADOT_LIMIT) -> List[Dict[str, Any]]:
+    if not table_exists("BNB_DERIVED_SIGNALS"):
+        return []
+    limit = safe_limit(limit, DEFAULT_POLKADOT_LIMIT, max_value=200)
+    return run_query(f"""
+        SELECT signal_date, signal_family, signal_key, severity, score, title,
+               description, metric_value_1, metric_value_2, metric_value_3, reference_id
+        FROM BNB_DERIVED_SIGNALS
+        ORDER BY signal_date DESC, score DESC
+        FETCH FIRST {limit} ROWS ONLY
+    """)
+
+
+def build_bnb_bundle() -> Dict[str, Any]:
+    return {
+        "available": any(table_exists(t) for t in [
+            "BNB_RPC_SNAPSHOT", "BNB_WHALE_EVENTS", "BNB_DEX_POOLS_DAILY",
+            "BNB_YIELD_RISK_SCORES", "BNB_VALIDATOR_SNAPSHOT", "BNB_GAS_FORECAST", "BNB_DERIVED_SIGNALS"
+        ]),
+        "rpc_snapshot": fetch_bnb_rpc_snapshot(),
+        "whales": fetch_bnb_whales(),
+        "pools": fetch_bnb_pools(),
+        "risk_scores": fetch_bnb_risk_scores(),
+        "validators": fetch_bnb_validators(),
+        "gas_forecast": fetch_bnb_gas_forecast(),
+        "derived_signals": fetch_bnb_derived(),
+    }
+
+
 def build_bundle() -> Dict[str, Any]:
     prices = fetch_prices()
     paprika = fetch_paprika()
@@ -660,6 +773,7 @@ def build_bundle() -> Dict[str, Any]:
         derived_limit=DEFAULT_POLKADOT_LIMIT,
         xcm_transfer_limit=DEFAULT_POLKADOT_XCM_CACHE_LIMIT,
     )
+    bnb = build_bnb_bundle()
 
     latest_signal = signals[0] if signals else None
     total_whale_usd = sum(float(x.get("raw_qty") or 0) for x in whales)
@@ -676,6 +790,13 @@ def build_bundle() -> Dict[str, Any]:
     polkadot_xcm_usd = sum(
         float(x.get("value_usd") or 0)
         for x in polkadot_xcm_rows
+        if x.get("value_usd") not in [None, "", "NaT"]
+    )
+
+    bnb_whales = bnb.get("whales", [])
+    bnb_whale_usd = sum(
+        float(x.get("value_usd") or 0)
+        for x in bnb_whales
         if x.get("value_usd") not in [None, "", "NaT"]
     )
 
@@ -697,6 +818,10 @@ def build_bundle() -> Dict[str, Any]:
                 "polkadot_extrinsic_feed": len(polkadot.get("extrinsic_feed", [])),
                 "polkadot_xcm_transfers": len(polkadot.get("xcm_transfers", [])),
                 "polkadot_whales": len(polkadot_xcm_rows),
+                "bnb_whales": len(bnb_whales),
+                "bnb_pools": len(bnb.get("pools", [])),
+                "bnb_validators": len(bnb.get("validators", [])),
+                "bnb_derived_signals": len(bnb.get("derived_signals", [])),
             },
         },
         "highlights": {
@@ -704,6 +829,7 @@ def build_bundle() -> Dict[str, Any]:
             "total_whale_usd": total_whale_usd,
             "sol_whale_usd": sol_whale_usd,
             "polkadot_whale_usd": polkadot_xcm_usd,
+            "bnb_whale_usd": bnb_whale_usd,
             "market_snapshot": build_market_snapshot(prices),
         },
         "summaries": summaries,
@@ -713,6 +839,7 @@ def build_bundle() -> Dict[str, Any]:
         "whales": whales,
         "news": news,
         "polkadot": polkadot,
+        "bnb": bnb,
     }
 
 
@@ -776,6 +903,50 @@ def render_polkadot_whales_text(rows: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def render_bnb_text(bundle: Dict[str, Any]) -> str:
+    lines = ["ASYNC SIGNALS :: BNB CHAIN", ""]
+    if not bundle.get("available"):
+        lines.append("BNB tables not available.")
+        return "\n".join(lines)
+    rpc = bundle.get("rpc_snapshot", [])
+    if rpc:
+        r = rpc[0]
+        lines.append(
+            f"Block: {r.get('latest_block_number', '-')} | "
+            f"TPS: {r.get('tps_1min', '-')} | "
+            f"Gas: {r.get('gas_price_gwei', '-')} gwei"
+        )
+    whales = bundle.get("whales", [])
+    if whales:
+        total = sum(float(t.get("value_usd") or 0) for t in whales)
+        lines.append(f"Whales: {len(whales)} events | ${total/1e6:.2f}M total")
+    pools = bundle.get("pools", [])
+    if pools:
+        lines.append(f"Pools: {len(pools)} tracked")
+    validators = bundle.get("validators", [])
+    if validators:
+        bad = [v for v in validators if v.get("missed_blocks_count", 0) > 5]
+        lines.append(
+            f"Validators: {len(validators)} tracked | {len(bad)} with missed blocks"
+        )
+    gas = bundle.get("gas_forecast", [])
+    if gas:
+        g = gas[0]
+        lines.append(
+            f"Gas forecast: {g.get('forecast_1h_gwei', '-')} gwei "
+            f"({g.get('congestion_level', '-')})"
+        )
+    derived = bundle.get("derived_signals", [])
+    if derived:
+        lines.append(f"Derived signals: {len(derived)}")
+        for d in derived[:5]:
+            lines.append(
+                f"  [{d.get('severity', '-').upper()}] {d.get('title', '-')} "
+                f"(score: {d.get('score', '-')})"
+            )
+    return "\n".join(lines)
+
+
 def render_bundle_text(bundle: Dict[str, Any]) -> str:
     lines = ["ASYNC SIGNALS :: SNAPSHOT", ""]
     meta = bundle.get("meta", {})
@@ -809,6 +980,7 @@ def render_bundle_text(bundle: Dict[str, Any]) -> str:
     lines.append(f"- total tracked whale USD: {fmt_usd(highlights.get('total_whale_usd'))}")
     lines.append(f"- SOL whale USD: {fmt_usd(highlights.get('sol_whale_usd'))}")
     lines.append(f"- Polkadot XCM USD: {fmt_usd(highlights.get('polkadot_whale_usd'))}")
+    lines.append(f"- BNB whale USD: {fmt_usd(highlights.get('bnb_whale_usd'))}")
     lines.append("")
 
     lines.append("LATEST SIGNAL")
@@ -889,6 +1061,42 @@ def render_bundle_text(bundle: Dict[str, Any]) -> str:
                     f"{row.get('title', '-')}"
                 )
 
+    bnb = bundle.get("bnb", {})
+    if bnb.get("available"):
+        lines.append("BNB")
+        rpc_rows = bnb.get("rpc_snapshot", [])
+        if rpc_rows:
+            rpc = rpc_rows[0]
+            lines.append(
+                f"- block {rpc.get('latest_block_number', '-')} | "
+                f"TPS: {rpc.get('tps_1min', '-')} | "
+                f"gas: {rpc.get('gas_price_gwei', '-')} gwei"
+            )
+        whales = bnb.get("whales", [])[:5]
+        if whales:
+            lines.append("- recent whale events:")
+            for row in whales:
+                lines.append(
+                    f" • {row.get('asset_symbol', '-')} | usd={fmt_usd(row.get('value_usd'))} | "
+                    f"{short_addr(row.get('from_address'))} -> {short_addr(row.get('to_address'))}"
+                )
+        pools = bnb.get("pools", [])[:3]
+        if pools:
+            lines.append("- top pools:")
+            for row in pools:
+                lines.append(
+                    f" • {row.get('token0_symbol', '-')}/{row.get('token1_symbol', '-')} | "
+                    f"TVL={fmt_usd(row.get('tvl_usd'))}"
+                )
+        derived = bnb.get("derived_signals", [])[:5]
+        if derived:
+            lines.append("- top signals:")
+            for row in derived:
+                lines.append(
+                    f" • [{row.get('severity', '-').upper()}] {row.get('title', '-')} "
+                    f"(score: {row.get('score', '-')})"
+                )
+
     return "\n".join(lines).strip()
 
 
@@ -963,6 +1171,12 @@ def get_cached_section(section_name: str, default: Any):
 def get_cached_polkadot() -> Dict[str, Any]:
     bundle = clone_cached_bundle()
     return bundle.get("polkadot", {"available": False})
+
+
+def get_cached_bnb() -> Dict[str, Any]:
+    bundle = clone_cached_bundle()
+    return bundle.get("bnb", {"available": False})
+
 
 class SolanaDecodeRequest(BaseModel):
     input_type: Optional[str] = Field(default="auto")
@@ -1511,544 +1725,112 @@ async def generate_ai_decoder_explanation(decoded: Dict[str, Any], request: Sola
         "error": last_error or "No AI provider succeeded",
     }
 
-def filter_summaries_by_asset(asset: str) -> List[Dict[str, Any]]:
-    items = get_cached_section("summaries", [])
-    return [x for x in items if str(x.get("asset", "")).upper() == asset.upper()]
+def fetch_sui_whales(limit: int = 50) -> List[Dict[str, Any]]:
+    if not table_exists("SUI_WHALE_EVENTS"):
+        return []
+    limit = safe_limit(limit, 50, max_value=200)
+    return run_query(
+        f"""
+        SELECT tx_hash, event_timestamp, from_addr, to_addr, token, amount, usd_value, protocol_tag, direction
+        FROM SUI_WHALE_EVENTS
+        ORDER BY event_timestamp DESC
+        FETCH FIRST {limit} ROWS ONLY
+        """
+    )
 
 
-def filter_signals_by_type(signal_type: str) -> List[Dict[str, Any]]:
-    items = get_cached_section("signals", [])
-    return [x for x in items if str(x.get("type", "")).upper() == signal_type.upper()]
+def fetch_sui_top_whales(limit: int = 50) -> List[Dict[str, Any]]:
+    if not table_exists("SUI_TOP_WHALES"):
+        return []
+    limit = safe_limit(limit, 50, max_value=200)
+    return run_query(
+        f"""
+        SELECT address, total_in_usd, total_out_usd, net_flow_usd, protocols_touched, protocol_list, tx_count, computed_at
+        FROM SUI_TOP_WHALES
+        ORDER BY net_flow_usd DESC
+        FETCH FIRST {limit} ROWS ONLY
+        """
+    )
 
 
-def filter_shared_whales_by_asset(asset: str) -> List[Dict[str, Any]]:
-    items = get_cached_section("whales", [])
-    return [x for x in items if str(x.get("asset", "")).upper() == asset.upper()]
+def fetch_sui_protocol_exposure() -> List[Dict[str, Any]]:
+    if not table_exists("SUI_PROTOCOL_EXPOSURE"):
+        return []
+    return run_query(
+        """
+        SELECT protocol, volume_usd, tx_count, computed_at
+        FROM SUI_PROTOCOL_EXPOSURE
+        ORDER BY volume_usd DESC
+        """
+    )
 
 
-def filter_polkadot_whales(
-    asset_symbol: Optional[str] = None,
-    min_usd: float = DEFAULT_POLKADOT_WHALE_MIN_USD,
-) -> List[Dict[str, Any]]:
-    polkadot = get_cached_polkadot()
-    items = polkadot.get("xcm_transfers", [])
-    return filter_polkadot_whales_from_rows(items, asset_symbol=asset_symbol, min_usd=min_usd)
+def fetch_sui_ai_summary() -> Optional[Dict[str, Any]]:
+    if not table_exists("SUI_AI_SUMMARIES"):
+        return None
+    rows = run_query(
+        """
+        SELECT summary_type, summary_text, computed_at
+        FROM SUI_AI_SUMMARIES
+        ORDER BY computed_at DESC
+        FETCH FIRST 1 ROWS ONLY
+        """
+    )
+    return rows[0] if rows else None
 
 
-async def auto_refresh_loop():
-    while True:
-        await asyncio.sleep(AUTO_REFRESH_INTERVAL_SECONDS)
-        try:
-            await asyncio.to_thread(load_cache, "auto_refresh")
-        except Exception:
-            pass
+def fetch_nodeops_metrics(node_id: Optional[str] = None, window_hours: int = 24, limit: int = 100) -> List[Dict[str, Any]]:
+    if not table_exists("NODEOPS_METRICS"):
+        return []
+    limit = safe_limit(limit, 100, max_value=500)
+    cutoff = datetime.utcnow() - timedelta(hours=window_hours)
+    cutoff_str = cutoff.isoformat()
 
-
-@app.on_event("startup")
-async def startup_load_cache():
-    await asyncio.to_thread(load_cache, "startup")
-    if AUTO_REFRESH_ENABLED:
-        app.state.auto_refresh_task = asyncio.create_task(auto_refresh_loop())
+    if node_id:
+        return run_query(
+            f"""
+            SELECT node_id, chain, ts, jobs_ok, jobs_failed, success_rate,
+                   avg_latency_ms, gas_spent_native, rewards_token, error_code,
+                   runbook_severity, runbook_advice, runbook_category
+            FROM NODEOPS_METRICS
+            WHERE node_id = :node_id
+              AND ts >= TO_TIMESTAMP(:cutoff, 'YYYY-MM-DD"T"HH24:MI:SS.FF')
+            ORDER BY ts DESC
+            FETCH FIRST {limit} ROWS ONLY
+            """,
+            {"node_id": node_id, "cutoff": cutoff_str}
+        )
     else:
-        app.state.auto_refresh_task = None
+        return run_query(
+            f"""
+            SELECT node_id, chain, ts, jobs_ok, jobs_failed, success_rate,
+                   avg_latency_ms, gas_spent_native, rewards_token, error_code,
+                   runbook_severity, runbook_advice, runbook_category
+            FROM NODEOPS_METRICS
+            WHERE ts >= TO_TIMESTAMP(:cutoff, 'YYYY-MM-DD"T"HH24:MI:SS.FF')
+            ORDER BY ts DESC
+            FETCH FIRST {limit} ROWS ONLY
+            """,
+            {"cutoff": cutoff_str}
+        )
 
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    task = getattr(app.state, "auto_refresh_task", None)
-    if task:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-
-
-@app.get("/")
-def root():
-    endpoints = [
-        "/health",
-        "/market",
-        "/news",
-        "/whales",
-        "/whales/{asset}",
-        "/summaries",
-        "/summaries/{asset}",
-        "/signals",
-        "/signals/{signal_type}",
-        "/polkadot",
-        "/polkadot/whales",
-        "/polkadot/whales/{asset_symbol}",
-        "/base",
-        "/base/whales",
-        "/base/signals",
-        "/bundle",
-    ]
-
-    if ENABLE_MANUAL_REFRESH:
-        endpoints.append("/refresh")
-
-    return {
-        "service": APP_TITLE,
-        "version": APP_VERSION,
-        "mode": "startup_ram_cache_with_auto_refresh",
-        "endpoints": endpoints,
-        "formats": ["json", "text"],
-        "auto_refresh_enabled": AUTO_REFRESH_ENABLED,
-        "auto_refresh_interval_seconds": AUTO_REFRESH_INTERVAL_SECONDS,
-        "manual_refresh_enabled": ENABLE_MANUAL_REFRESH,
-    }
-
-
-@app.get("/health")
-def health():
-    meta = get_cache_meta()
-    return {
-        "service": APP_TITLE,
-        "version": APP_VERSION,
-        "ok": CACHE.get("bundle") is not None,
-        "timestamp": utc_now_z(),
-        **meta,
-        "manual_refresh_enabled": ENABLE_MANUAL_REFRESH,
-    }
-
-
-@app.post("/refresh")
-async def refresh_cache(x_refresh_token: Optional[str] = Header(None)):
-    if not ENABLE_MANUAL_REFRESH:
-        raise HTTPException(status_code=403, detail="Manual refresh is disabled")
-    if MANUAL_REFRESH_TOKEN and x_refresh_token != MANUAL_REFRESH_TOKEN:
-        raise HTTPException(status_code=401, detail="Invalid refresh token")
-
-    try:
-        meta = await asyncio.to_thread(load_cache, "manual_refresh")
-        return {
-            "ok": True,
-            "message": "Cache refreshed successfully",
-            "timestamp": utc_now_z(),
-            **meta,
-        }
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Refresh failed: {exc}")
-
-@app.post("/v1/solana/decode-error")
-async def decode_solana_error(request: SolanaDecodeRequest):
-    payload_dict = {
-        "signature": request.signature,
-        "program_id": request.program_id,
-        "accounts": request.accounts,
-        "transaction": request.transaction,
-        "payload": request.payload,
-        "logs": request.logs,
-    }
-
-    result = decode_solana_error_payload(request.input_type, payload_dict)
-
-    ai_requested = bool(request.use_ai)
-    ai_allowed = bool(SOLANA_DECODE_USE_AI)
-    ai_used = False
-    ai_result = None
-
-    if ai_requested and ai_allowed:
-        ai_result = await generate_ai_decoder_explanation(result, request)
-        if ai_result and ai_result.get("provider"):
-            ai_used = True
-
-    response_payload = {
-        "meta": {
-            "service": "AsyncSignals",
-            "endpoint": "v1_solana_decode_error",
-            "generated_at": utc_now_z(),
-            "ai_requested": ai_requested,
-            "ai_enabled": ai_requested and ai_allowed,
-            "ai_used": ai_used,
-            "helius_configured": bool(HELIUS_API_KEY),
-            "alchemy_configured": bool(ALCHEMY_KEY),
-        },
-        **result,
-    }
-
-    if ai_result:
-        response_payload["ai_analysis"] = ai_result
-
-    return JSONResponse(content=to_jsonable(response_payload))
-
-@app.get("/market")
-def get_market(
-    format: str = Query("json", pattern="^(json|text)$"),
-    limit: int = Query(DEFAULT_MARKET_LIMIT, ge=1, le=250),
-):
-    items = get_cached_section("market", [])[:limit]
-    meta = get_cache_meta()
-    payload = {
-        "meta": {
-            "service": "AsyncSignals",
-            "endpoint": "market",
-            "limit": limit,
-            "count": len(items),
-            "generated_at": meta.get("cache_loaded_at"),
-            "cache_status": meta.get("cache_status"),
-        },
-        "items": items,
-    }
-
-    if format == "text":
-        lines = ["ASYNC SIGNALS :: MARKET", ""]
-        if not items:
-            lines.append("No market rows found.")
-        else:
-            for row in items:
-                lines.append(
-                    f"{row.get('symbol', '-')} | price={fmt_usd(row.get('current_price'))} | "
-                    f"market_cap={fmt_usd(row.get('market_cap'))} | "
-                    f"24h={row.get('price_change_percentage_24h', 0)}%"
-                )
-        return PlainTextResponse("\n".join(lines).strip())
-
-    return JSONResponse(content=to_jsonable(payload))
-
-
-@app.get("/news")
-def get_news(
-    format: str = Query("json", pattern="^(json|text)$"),
-    limit: int = Query(DEFAULT_NEWS_LIMIT, ge=1, le=100),
-):
-    items = get_cached_section("news", [])[:limit]
-    meta = get_cache_meta()
-    payload = {
-        "meta": {
-            "service": "AsyncSignals",
-            "endpoint": "news",
-            "limit": limit,
-            "count": len(items),
-            "generated_at": meta.get("cache_loaded_at"),
-            "cache_status": meta.get("cache_status"),
-        },
-        "items": items,
-    }
-
-    if format == "text":
-        lines = ["ASYNC SIGNALS :: NEWS", ""]
-        if not items:
-            lines.append("No news rows found.")
-        else:
-            for row in items:
-                lines.append(f"{row.get('pubdate', '-')} | {row.get('source_id', '-')}")
-                lines.append(str(row.get("title", "")).strip())
-                lines.append(str(row.get("link", "")).strip())
-                lines.append("-" * 80)
-        return PlainTextResponse("\n".join(lines))
-
-    return JSONResponse(content=to_jsonable(payload))
-
-
-@app.get("/whales")
-def get_whales(
-    format: str = Query("json", pattern="^(json|text)$"),
-    limit: int = Query(DEFAULT_WHALE_LIMIT, ge=1, le=250),
-    asset: Optional[str] = Query(None),
-):
-    items = get_cached_section("whales", [])
-    if asset:
-        items = filter_shared_whales_by_asset(asset)
-    items = items[:limit]
-
-    meta = get_cache_meta()
-    payload = {
-        "meta": {
-            "service": "AsyncSignals",
-            "endpoint": "whales",
-            "limit": limit,
-            "asset_filter": asset.upper() if asset else None,
-            "count": len(items),
-            "generated_at": meta.get("cache_loaded_at"),
-            "cache_status": meta.get("cache_status"),
-        },
-        "items": items,
-    }
-
-    if format == "text":
-        return PlainTextResponse(render_shared_whales_text(items))
-    return JSONResponse(content=to_jsonable(payload))
-
-
-@app.get("/whales/{asset}")
-def get_whales_by_asset(
-    asset: str = Path(..., min_length=1),
-    format: str = Query("json", pattern="^(json|text)$"),
-    limit: int = Query(DEFAULT_WHALE_LIMIT, ge=1, le=250),
-):
-    items = filter_shared_whales_by_asset(asset)[:limit]
-    meta = get_cache_meta()
-    payload = {
-        "meta": {
-            "service": "AsyncSignals",
-            "endpoint": "whales_by_asset",
-            "limit": limit,
-            "asset_filter": asset.upper(),
-            "count": len(items),
-            "generated_at": meta.get("cache_loaded_at"),
-            "cache_status": meta.get("cache_status"),
-        },
-        "items": items,
-    }
-
-    if format == "text":
-        return PlainTextResponse(render_shared_whales_text(items))
-    return JSONResponse(content=to_jsonable(payload))
-
-
-@app.get("/summaries")
-def get_summaries(
-    format: str = Query("json", pattern="^(json|text)$"),
-    asset: Optional[str] = Query(None),
-):
-    items = get_cached_section("summaries", [])
-    if asset:
-        items = filter_summaries_by_asset(asset)
-
-    meta = get_cache_meta()
-    payload = {
-        "meta": {
-            "service": "AsyncSignals",
-            "endpoint": "summaries",
-            "asset_filter": asset.upper() if asset else None,
-            "count": len(items),
-            "generated_at": meta.get("cache_loaded_at"),
-            "cache_status": meta.get("cache_status"),
-        },
-        "items": items,
-    }
-
-    return respond(payload, format, render_summaries_text)
-
-
-@app.get("/summaries/{asset}")
-def get_summaries_by_asset(
-    asset: str = Path(..., min_length=1),
-    format: str = Query("json", pattern="^(json|text)$"),
-):
-    items = filter_summaries_by_asset(asset)
-    meta = get_cache_meta()
-    payload = {
-        "meta": {
-            "service": "AsyncSignals",
-            "endpoint": "summaries_by_asset",
-            "asset_filter": asset.upper(),
-            "count": len(items),
-            "generated_at": meta.get("cache_loaded_at"),
-            "cache_status": meta.get("cache_status"),
-        },
-        "items": items,
-    }
-
-    return respond(payload, format, render_summaries_text)
-
-
-@app.get("/signals")
-def get_signals(
-    format: str = Query("json", pattern="^(json|text)$"),
-    limit: int = Query(DEFAULT_SIGNAL_LIMIT, ge=1, le=500),
-    signal_type: Optional[str] = Query(None),
-):
-    items = get_cached_section("signals", [])
-    if signal_type:
-        items = filter_signals_by_type(signal_type)
-    items = items[:limit]
-
-    meta = get_cache_meta()
-    payload = {
-        "meta": {
-            "service": "AsyncSignals",
-            "endpoint": "signals",
-            "limit": limit,
-            "signal_type_filter": signal_type.upper() if signal_type else None,
-            "count": len(items),
-            "generated_at": meta.get("cache_loaded_at"),
-            "cache_status": meta.get("cache_status"),
-        },
-        "items": items,
-    }
-
-    return respond(payload, format, render_signals_text)
-
-
-@app.get("/signals/{signal_type}")
-def get_signals_by_type(
-    signal_type: str = Path(..., min_length=1),
-    format: str = Query("json", pattern="^(json|text)$"),
-    limit: int = Query(DEFAULT_SIGNAL_LIMIT, ge=1, le=500),
-):
-    items = filter_signals_by_type(signal_type)[:limit]
-    meta = get_cache_meta()
-    payload = {
-        "meta": {
-            "service": "AsyncSignals",
-            "endpoint": "signals_by_type",
-            "limit": limit,
-            "signal_type_filter": signal_type.upper(),
-            "count": len(items),
-            "generated_at": meta.get("cache_loaded_at"),
-            "cache_status": meta.get("cache_status"),
-        },
-        "items": items,
-    }
-
-    return respond(payload, format, render_signals_text)
-
-
-@app.get("/polkadot")
-def get_polkadot(
-    format: str = Query("json", pattern="^(json|text)$"),
-    derived_limit: int = Query(DEFAULT_POLKADOT_LIMIT, ge=1, le=200),
-    xcm_transfer_limit: int = Query(20, ge=1, le=100),
-):
-    polkadot = get_cached_polkadot()
-    polkadot_copy = {
-        "available": polkadot.get("available", False),
-        "rpc_snapshot": polkadot.get("rpc_snapshot", []),
-        "chain_activity": polkadot.get("chain_activity", []),
-        "derived_signals": polkadot.get("derived_signals", [])[:derived_limit],
-        "extrinsic_feed": polkadot.get("extrinsic_feed", []),
-        "staking": polkadot.get("staking", []),
-        "treasury": polkadot.get("treasury", []),
-        "validators": polkadot.get("validators", []),
-        "xcm_summary": polkadot.get("xcm_summary", []),
-        "xcm_transfers": polkadot.get("xcm_transfers", [])[:xcm_transfer_limit],
-        "opengov": polkadot.get("opengov", []),
-    }
-
-    meta = get_cache_meta()
-    payload = {
-        "meta": {
-            "service": "AsyncSignals",
-            "endpoint": "polkadot",
-            "generated_at": meta.get("cache_loaded_at"),
-            "derived_limit": derived_limit,
-            "xcm_transfer_limit": xcm_transfer_limit,
-            "cache_status": meta.get("cache_status"),
-        },
-        "items": polkadot_copy,
-    }
-
-    if format == "text":
-        bundle_like = {
-            "meta": payload["meta"],
-            "highlights": {},
-            "summaries": [],
-            "signals": [],
-            "market": [],
-            "market_reference": [],
-            "whales": [],
-            "news": [],
-            "polkadot": payload["items"],
-        }
-        return PlainTextResponse(render_bundle_text(bundle_like))
-
-    return JSONResponse(content=to_jsonable(payload))
-
-
-@app.get("/polkadot/whales")
-def get_polkadot_whales(
-    format: str = Query("json", pattern="^(json|text)$"),
-    asset_symbol: Optional[str] = Query(None),
-    min_usd: float = Query(DEFAULT_POLKADOT_WHALE_MIN_USD, ge=0),
-    limit: int = Query(20, ge=1, le=100),
-):
-    polkadot = get_cached_polkadot()
-    all_rows = polkadot.get("xcm_transfers", [])
-
-    filtered_all = filter_polkadot_whales_from_rows(
-        all_rows,
-        asset_symbol=asset_symbol,
-        min_usd=min_usd,
+def fetch_nodeops_health_summary() -> List[Dict[str, Any]]:
+    if not table_exists("NODEOPS_METRICS"):
+        return []
+    return run_query(
+        """
+        SELECT node_id, chain, MAX(ts) as last_seen,
+               AVG(success_rate) as avg_success_rate,
+               AVG(avg_latency_ms) as avg_latency,
+               MAX(error_code) as last_error,
+               MAX(runbook_advice) as last_runbook
+        FROM NODEOPS_METRICS
+        GROUP BY node_id, chain
+        ORDER BY last_seen DESC
+        """
     )
-    items = filtered_all[:limit]
 
-    rows_after_asset_filter = [
-        x for x in all_rows
-        if not asset_symbol or str(x.get("asset_symbol", "")).upper() == asset_symbol.upper()
-    ]
-
-    meta = get_cache_meta()
-    payload = {
-        "meta": {
-            "service": "AsyncSignals",
-            "endpoint": "polkadot_whales",
-            "asset_symbol_filter": asset_symbol.upper() if asset_symbol else None,
-            "min_usd": min_usd,
-            "limit": limit,
-            "count": len(items),
-            "total_rows_before_filters": len(all_rows),
-            "rows_after_asset_filter": len(rows_after_asset_filter),
-            "rows_with_value_usd": count_rows_with_value_usd(rows_after_asset_filter),
-            "rows_without_value_usd": count_rows_without_value_usd(rows_after_asset_filter),
-            "generated_at": meta.get("cache_loaded_at"),
-            "cache_status": meta.get("cache_status"),
-        },
-        "items": items,
-    }
-
-    if format == "text":
-        return PlainTextResponse(render_polkadot_whales_text(items))
-    return JSONResponse(content=to_jsonable(payload))
-
-
-@app.get("/polkadot/whales/{asset_symbol}")
-def get_polkadot_whales_by_asset(
-    asset_symbol: str = Path(..., min_length=1),
-    format: str = Query("json", pattern="^(json|text)$"),
-    min_usd: float = Query(DEFAULT_POLKADOT_WHALE_MIN_USD, ge=0),
-    limit: int = Query(20, ge=1, le=100),
-):
-    polkadot = get_cached_polkadot()
-    all_rows = polkadot.get("xcm_transfers", [])
-
-    filtered_all = filter_polkadot_whales_from_rows(
-        all_rows,
-        asset_symbol=asset_symbol,
-        min_usd=min_usd,
-    )
-    items = filtered_all[:limit]
-
-    rows_after_asset_filter = [
-        x for x in all_rows
-        if str(x.get("asset_symbol", "")).upper() == asset_symbol.upper()
-    ]
-
-    meta = get_cache_meta()
-    payload = {
-        "meta": {
-            "service": "AsyncSignals",
-            "endpoint": "polkadot_whales_by_asset",
-            "asset_symbol_filter": asset_symbol.upper(),
-            "min_usd": min_usd,
-            "limit": limit,
-            "count": len(items),
-            "total_rows_before_filters": len(all_rows),
-            "rows_after_asset_filter": len(rows_after_asset_filter),
-            "rows_with_value_usd": count_rows_with_value_usd(rows_after_asset_filter),
-            "rows_without_value_usd": count_rows_without_value_usd(rows_after_asset_filter),
-            "generated_at": meta.get("cache_loaded_at"),
-            "cache_status": meta.get("cache_status"),
-        },
-        "items": items,
-    }
-
-    if format == "text":
-        return PlainTextResponse(render_polkadot_whales_text(items))
-    return JSONResponse(content=to_jsonable(payload))
-
-
-@app.get("/bundle")
-def get_bundle(format: str = Query("json", pattern="^(json|text)$")):
-    payload = cached_bundle_with_meta()
-    if format == "text":
-        return PlainTextResponse(render_bundle_text(payload))
-    return JSONResponse(content=to_jsonable(payload))
-
-
-
-
-# ── Base endpoints ────────────────────────────────────────────────────────────
 
 def fetch_base_rpc_snapshot() -> List[Dict[str, Any]]:
     if not table_exists("BASE_RPC_SNAPSHOT"):
@@ -2139,7 +1921,7 @@ def render_base_text(bundle: Dict[str, Any]) -> str:
     lines = ["ASYNC SIGNALS :: BASE CHAIN", ""]
     if not bundle.get("available"):
         lines.append("Base tables not available.")
-        return "".join(lines)
+        return "\n".join(lines)
     rpc = bundle.get("rpc_snapshot", [])
     if rpc:
         r = rpc[0]
@@ -2157,11 +1939,857 @@ def render_base_text(bundle: Dict[str, Any]) -> str:
         lines.append(f"Derived signals: {len(derived)}")
         for d in derived[:5]:
             lines.append(f"  [{d.get('severity', '-').upper()}] {d.get('title', '-')} (score: {d.get('score', '-')})")
-    return "".join(lines)
+    return "\n".join(lines)
+
+
+@app.get("/")
+@limiter.limit("20/minute")
+def root(request: Request):
+    endpoints = [
+        "/health",
+        "/market",
+        "/news",
+        "/whales",
+        "/whales/{asset}",
+        "/summaries",
+        "/summaries/{asset}",
+        "/signals",
+        "/signals/{signal_type}",
+        "/polkadot",
+        "/polkadot/whales",
+        "/polkadot/whales/{asset_symbol}",
+        "/base",
+        "/base/whales",
+        "/base/signals",
+        "/bnb",
+        "/bnb/whales",
+        "/bnb/whales/{asset_symbol}",
+        "/bnb/pools",
+        "/bnb/risk",
+        "/bnb/validators",
+        "/bnb/gas",
+        "/bnb/signals",
+        "/bundle",
+        "/sui/whale-transfers",
+        "/sui/top-whales",
+        "/sui/protocol-exposure",
+        "/sui/summary",
+        "/api/v1/nodeops/telemetry",
+        "/api/v1/nodeops/metrics",
+        "/api/v1/nodeops/metrics.csv",
+        "/api/v1/nodeops/health",
+    ]
+
+    if ENABLE_MANUAL_REFRESH:
+        endpoints.append("/refresh")
+
+    return {
+        "service": APP_TITLE,
+        "version": APP_VERSION,
+        "mode": "startup_ram_cache_with_auto_refresh",
+        "endpoints": endpoints,
+        "formats": ["json", "text"],
+        "auto_refresh_enabled": AUTO_REFRESH_ENABLED,
+        "auto_refresh_interval_seconds": AUTO_REFRESH_INTERVAL_SECONDS,
+        "manual_refresh_enabled": ENABLE_MANUAL_REFRESH,
+    }
+
+
+@app.get("/health")
+@limiter.limit("20/minute")
+def health(request: Request):
+    meta = get_cache_meta()
+    return {
+        "service": APP_TITLE,
+        "version": APP_VERSION,
+        "ok": CACHE.get("bundle") is not None,
+        "timestamp": utc_now_z(),
+        **meta,
+        "manual_refresh_enabled": ENABLE_MANUAL_REFRESH,
+    }
+
+
+@app.post("/refresh")
+@limiter.limit("20/minute")
+async def refresh_cache(request: Request, x_refresh_token: Optional[str] = Header(None)):
+    if not ENABLE_MANUAL_REFRESH:
+        raise HTTPException(status_code=403, detail="Manual refresh is disabled")
+    if MANUAL_REFRESH_TOKEN and x_refresh_token != MANUAL_REFRESH_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+    try:
+        meta = await asyncio.to_thread(load_cache, "manual_refresh")
+        return {
+            "ok": True,
+            "message": "Cache refreshed successfully",
+            "timestamp": utc_now_z(),
+            **meta,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Refresh failed: {exc}")
+
+
+@app.post("/v1/solana/decode-error")
+@limiter.limit("20/minute")
+async def decode_solana_error(request: Request, body: SolanaDecodeRequest):
+    payload_dict = {
+        "signature": body.signature,
+        "program_id": body.program_id,
+        "accounts": body.accounts,
+        "transaction": body.transaction,
+        "payload": body.payload,
+        "logs": body.logs,
+    }
+
+    result = decode_solana_error_payload(body.input_type, payload_dict)
+
+    ai_requested = bool(body.use_ai)
+    ai_allowed = bool(SOLANA_DECODE_USE_AI)
+    ai_used = False
+    ai_result = None
+
+    if ai_requested and ai_allowed:
+        ai_result = await generate_ai_decoder_explanation(result, body)
+        if ai_result and ai_result.get("provider"):
+            ai_used = True
+
+    response_payload = {
+        "meta": {
+            "service": "AsyncSignals",
+            "endpoint": "v1_solana_decode_error",
+            "generated_at": utc_now_z(),
+            "ai_requested": ai_requested,
+            "ai_enabled": ai_requested and ai_allowed,
+            "ai_used": ai_used,
+            "helius_configured": bool(HELIUS_API_KEY),
+            "alchemy_configured": bool(ALCHEMY_KEY),
+        },
+        **result,
+    }
+
+    if ai_result:
+        response_payload["ai_analysis"] = ai_result
+
+    return JSONResponse(content=to_jsonable(response_payload))
+
+
+@app.get("/spot")
+@limiter.limit("20/minute")
+def get_spot(request: Request):
+    prices = fetch_prices(limit=50)
+    paprika = fetch_paprika(limit=50)
+    base_bundle = build_base_bundle()
+    bnb_bundle = build_bnb_bundle()
+
+    lookup = {}
+    for p in prices:
+        sym = str(p.get("symbol", "")).upper()
+        if sym:
+            lookup[sym] = {
+                "price": float(p.get("current_price") or 0),
+                "change_24h": float(p.get("price_change_percentage_24h") or 0),
+                "market_cap": float(p.get("market_cap") or 0),
+            }
+
+    for p in paprika:
+        sym = str(p.get("symbol", "")).upper()
+        if sym and sym not in lookup:
+            lookup[sym] = {
+                "price": float(p.get("price") or 0),
+                "change_24h": None,
+                "market_cap": None,
+            }
+
+    base_eth_price = None
+    base_block = None
+    base_tps = None
+    base_whale_usd = 0
+    if base_bundle.get("available"):
+        eco = base_bundle.get("ecosystem", [])
+        if eco:
+            base_eth_price = eco[0].get("eth_price_usd")
+        rpc = base_bundle.get("rpc_snapshot", [])
+        if rpc:
+            base_block = rpc[0].get("latest_block_number")
+            base_tps = rpc[0].get("tps_1min")
+        transfers = base_bundle.get("transfers", [])
+        base_whale_usd = sum(float(t.get("value_usd") or 0) for t in transfers)
+
+    bnb_block = None
+    bnb_tps = None
+    bnb_whale_usd = 0
+    if bnb_bundle.get("available"):
+        rpc = bnb_bundle.get("rpc_snapshot", [])
+        if rpc:
+            bnb_block = rpc[0].get("latest_block_number")
+            bnb_tps = rpc[0].get("tps_1min")
+        whales = bnb_bundle.get("whales", [])
+        bnb_whale_usd = sum(float(t.get("value_usd") or 0) for t in whales)
+
+    return JSONResponse(content=to_jsonable({
+        "meta": {
+            "service": APP_TITLE,
+            "endpoint": "spot",
+            "generated_at": utc_now_z(),
+        },
+        "btc": lookup.get("BTC"),
+        "eth": lookup.get("ETH"),
+        "sol": lookup.get("SOL"),
+        "dot": lookup.get("DOT"),
+        "bnb": lookup.get("BNB"),
+        "base": {
+            "eth_price_usd": base_eth_price,
+            "latest_block": base_block,
+            "tps_1min": base_tps,
+            "whale_flow_usd": base_whale_usd,
+        },
+        "bnb": {
+            "latest_block": bnb_block,
+            "tps_1min": bnb_tps,
+            "whale_flow_usd": bnb_whale_usd,
+        }
+    }))
+
+
+def filter_summaries_by_asset(asset: str) -> List[Dict[str, Any]]:
+    items = get_cached_section("summaries", [])
+    return [x for x in items if str(x.get("asset", "")).upper() == asset.upper()]
+
+
+def filter_signals_by_type(signal_type: str) -> List[Dict[str, Any]]:
+    items = get_cached_section("signals", [])
+    return [x for x in items if str(x.get("type", "")).upper() == signal_type.upper()]
+
+
+def filter_shared_whales_by_asset(asset: str) -> List[Dict[str, Any]]:
+    items = get_cached_section("whales", [])
+    return [x for x in items if str(x.get("asset", "")).upper() == asset.upper()]
+
+
+def filter_polkadot_whales(
+    asset_symbol: Optional[str] = None,
+    min_usd: float = DEFAULT_POLKADOT_WHALE_MIN_USD,
+) -> List[Dict[str, Any]]:
+    polkadot = get_cached_polkadot()
+    items = polkadot.get("xcm_transfers", [])
+    return filter_polkadot_whales_from_rows(items, asset_symbol=asset_symbol, min_usd=min_usd)
+
+
+async def auto_refresh_loop():
+    while True:
+        await asyncio.sleep(AUTO_REFRESH_INTERVAL_SECONDS)
+        try:
+            await asyncio.to_thread(load_cache, "auto_refresh")
+        except Exception:
+            pass
+
+
+@app.on_event("startup")
+async def startup_load_cache():
+    await asyncio.to_thread(load_cache, "startup")
+    if AUTO_REFRESH_ENABLED:
+        app.state.auto_refresh_task = asyncio.create_task(auto_refresh_loop())
+    else:
+        app.state.auto_refresh_task = None
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    task = getattr(app.state, "auto_refresh_task", None)
+    if task:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+@app.get("/sui/whale-transfers")
+@limiter.limit("20/minute")
+def get_sui_whale_transfers(
+    request: Request,
+    format: str = Query("json", pattern="^(json|text)$"),
+    limit: int = Query(50, ge=1, le=200),
+    protocol: Optional[str] = Query(None),
+):
+    items = fetch_sui_whales(limit=limit)
+    if protocol:
+        items = [x for x in items if str(x.get("protocol_tag", "")).lower() == protocol.lower()]
+
+    meta = get_cache_meta()
+    payload = {
+        "meta": {
+            "service": APP_TITLE,
+            "endpoint": "sui_whale_transfers",
+            "limit": limit,
+            "protocol_filter": protocol,
+            "count": len(items),
+            "generated_at": meta.get("cache_loaded_at"),
+            "cache_status": meta.get("cache_status"),
+        },
+        "items": items,
+    }
+
+    if format == "text":
+        lines = ["ASYNC SIGNALS :: SUI WHALE TRANSFERS", ""]
+        if not items:
+            lines.append("No Sui whale transfers found.")
+        else:
+            for row in items:
+                lines.append(
+                    f"{row.get('event_timestamp', '-')} | {row.get('protocol_tag', '-')} | "
+                    f"{row.get('token', '-')} | amount={row.get('amount', 0)} | "
+                    f"usd=${row.get('usd_value', 0)} | {short_addr(row.get('from_addr'))} -> {short_addr(row.get('to_addr'))}"
+                )
+        return PlainTextResponse("\n".join(lines))
+    return JSONResponse(content=to_jsonable(payload))
+
+
+@app.get("/sui/top-whales")
+@limiter.limit("20/minute")
+def get_sui_top_whales(
+    request: Request,
+    format: str = Query("json", pattern="^(json|text)$"),
+    limit: int = Query(50, ge=1, le=200),
+    window: str = Query("7d", pattern="^(7d|24h|30d)$"),
+):
+    items = fetch_sui_top_whales(limit=limit)
+    meta = get_cache_meta()
+    payload = {
+        "meta": {
+            "service": APP_TITLE,
+            "endpoint": "sui_top_whales",
+            "limit": limit,
+            "window": window,
+            "count": len(items),
+            "generated_at": meta.get("cache_loaded_at"),
+            "cache_status": meta.get("cache_status"),
+        },
+        "items": items,
+    }
+    return JSONResponse(content=to_jsonable(payload))
+
+
+@app.get("/sui/protocol-exposure")
+@limiter.limit("20/minute")
+def get_sui_protocol_exposure(
+    request: Request,
+    format: str = Query("json", pattern="^(json|text)$"),
+):
+    items = fetch_sui_protocol_exposure()
+    meta = get_cache_meta()
+    payload = {
+        "meta": {
+            "service": APP_TITLE,
+            "endpoint": "sui_protocol_exposure",
+            "count": len(items),
+            "generated_at": meta.get("cache_loaded_at"),
+            "cache_status": meta.get("cache_status"),
+        },
+        "items": items,
+    }
+    return JSONResponse(content=to_jsonable(payload))
+
+
+@app.get("/sui/summary")
+@limiter.limit("20/minute")
+def get_sui_summary(request: Request):
+    summary = fetch_sui_ai_summary()
+    meta = get_cache_meta()
+    return JSONResponse(content=to_jsonable({
+        "meta": {
+            "service": APP_TITLE,
+            "endpoint": "sui_summary",
+            "note": "Currently rule-based. With funding: Oracle 26AI native vector search + semantic query.",
+            "generated_at": meta.get("cache_loaded_at"),
+        },
+        "summary": summary,
+    }))
+
+
+@app.post("/api/v1/nodeops/telemetry")
+@limiter.limit("20/minute")
+def post_nodeops_telemetry(request: Request, payload: Dict[str, Any]):
+    try:
+        from data.nodeops_telemetry import ingest_telemetry, write_telemetry
+    except ImportError:
+        from nodeops_telemetry import ingest_telemetry, write_telemetry
+    record = ingest_telemetry(payload)
+    write_telemetry([record])
+    return JSONResponse(content=to_jsonable({
+        "ok": True,
+        "node_id": record["node_id"],
+        "runbook": record["runbook_advice"] if record["runbook_advice"] else None,
+        "ingested_at": utc_now_z(),
+    }))
+
+
+@app.get("/api/v1/nodeops/metrics")
+@limiter.limit("20/minute")
+def get_nodeops_metrics(
+    request: Request,
+    node_id: Optional[str] = Query(None),
+    window: int = Query(24, ge=1, le=168),
+    format: str = Query("json", pattern="^(json|text)$"),
+    limit: int = Query(100, ge=1, le=500),
+):
+    items = fetch_nodeops_metrics(node_id=node_id, window_hours=window, limit=limit)
+    meta = get_cache_meta()
+    payload = {
+        "meta": {
+            "service": APP_TITLE,
+            "endpoint": "nodeops_metrics",
+            "node_id_filter": node_id,
+            "window_hours": window,
+            "limit": limit,
+            "count": len(items),
+            "generated_at": meta.get("cache_loaded_at"),
+        },
+        "items": items,
+    }
+
+    if format == "text":
+        lines = ["ASYNC SIGNALS :: NODEOPS METRICS", ""]
+        if not items:
+            lines.append("No NodeOps metrics found.")
+        else:
+            for row in items:
+                lines.append(
+                    f"{row.get('ts', '-')} | {row.get('node_id', '-')} | {row.get('chain', '-')} | "
+                    f"success={row.get('success_rate', 0)}% | latency={row.get('avg_latency_ms', 0)}ms | "
+                    f"gas={row.get('gas_spent_native', 0)} | rewards={row.get('rewards_token', 0)}"
+                )
+                if row.get("error_code"):
+                    lines.append(f"  ERROR: {row['error_code']} | ADVICE: {row.get('runbook_advice', 'N/A')}")
+        return PlainTextResponse("\n".join(lines))
+    return JSONResponse(content=to_jsonable(payload))
+
+
+@app.get("/api/v1/nodeops/metrics.csv")
+@limiter.limit("20/minute")
+def get_nodeops_metrics_csv(
+    request: Request,
+    node_id: Optional[str] = Query(None),
+    window: int = Query(24, ge=1, le=168),
+):
+    try:
+        from data.nodeops_telemetry import export_metrics_csv
+    except ImportError:
+        from nodeops_telemetry import export_metrics_csv
+    csv_data = export_metrics_csv(node_id=node_id, window_hours=window)
+    return StreamingResponse(
+        io.StringIO(csv_data),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=nodeops_metrics_{node_id or 'all'}.csv"}
+    )
+
+
+@app.get("/api/v1/nodeops/health")
+@limiter.limit("20/minute")
+def get_nodeops_health(request: Request):
+    items = fetch_nodeops_health_summary()
+    return JSONResponse(content=to_jsonable({
+        "meta": {
+            "service": APP_TITLE,
+            "endpoint": "nodeops_health",
+            "count": len(items),
+            "generated_at": utc_now_z(),
+        },
+        "items": items,
+    }))
+
+
+@app.get("/market")
+@limiter.limit("20/minute")
+def get_market(
+    request: Request,
+    format: str = Query("json", pattern="^(json|text)$"),
+    limit: int = Query(DEFAULT_MARKET_LIMIT, ge=1, le=250),
+):
+    items = get_cached_section("market", [])[:limit]
+    meta = get_cache_meta()
+    payload = {
+        "meta": {
+            "service": "AsyncSignals",
+            "endpoint": "market",
+            "limit": limit,
+            "count": len(items),
+            "generated_at": meta.get("cache_loaded_at"),
+            "cache_status": meta.get("cache_status"),
+        },
+        "items": items,
+    }
+
+    if format == "text":
+        lines = ["ASYNC SIGNALS :: MARKET", ""]
+        if not items:
+            lines.append("No market rows found.")
+        else:
+            for row in items:
+                lines.append(
+                    f"{row.get('symbol', '-')} | price={fmt_usd(row.get('current_price'))} | "
+                    f"market_cap={fmt_usd(row.get('market_cap'))} | "
+                    f"24h={row.get('price_change_percentage_24h', 0)}%"
+                )
+        return PlainTextResponse("\n".join(lines).strip())
+
+    return JSONResponse(content=to_jsonable(payload))
+
+
+@app.get("/news")
+@limiter.limit("20/minute")
+def get_news(
+    request: Request,
+    format: str = Query("json", pattern="^(json|text)$"),
+    limit: int = Query(DEFAULT_NEWS_LIMIT, ge=1, le=100),
+):
+    items = get_cached_section("news", [])[:limit]
+    meta = get_cache_meta()
+    payload = {
+        "meta": {
+            "service": "AsyncSignals",
+            "endpoint": "news",
+            "limit": limit,
+            "count": len(items),
+            "generated_at": meta.get("cache_loaded_at"),
+            "cache_status": meta.get("cache_status"),
+        },
+        "items": items,
+    }
+
+    if format == "text":
+        lines = ["ASYNC SIGNALS :: NEWS", ""]
+        if not items:
+            lines.append("No news rows found.")
+        else:
+            for row in items:
+                lines.append(f"{row.get('pubdate', '-')} | {row.get('source_id', '-')}")
+                lines.append(str(row.get("title", "")).strip())
+                lines.append(str(row.get("link", "")).strip())
+                lines.append("-" * 80)
+        return PlainTextResponse("\n".join(lines))
+
+    return JSONResponse(content=to_jsonable(payload))
+
+
+@app.get("/whales")
+@limiter.limit("20/minute")
+def get_whales(
+    request: Request,
+    format: str = Query("json", pattern="^(json|text)$"),
+    limit: int = Query(DEFAULT_WHALE_LIMIT, ge=1, le=250),
+    asset: Optional[str] = Query(None),
+):
+    items = get_cached_section("whales", [])
+    if asset:
+        items = filter_shared_whales_by_asset(asset)
+    items = items[:limit]
+
+    meta = get_cache_meta()
+    payload = {
+        "meta": {
+            "service": "AsyncSignals",
+            "endpoint": "whales",
+            "limit": limit,
+            "asset_filter": asset.upper() if asset else None,
+            "count": len(items),
+            "generated_at": meta.get("cache_loaded_at"),
+            "cache_status": meta.get("cache_status"),
+        },
+        "items": items,
+    }
+
+    if format == "text":
+        return PlainTextResponse(render_shared_whales_text(items))
+    return JSONResponse(content=to_jsonable(payload))
+
+
+@app.get("/whales/{asset}")
+@limiter.limit("20/minute")
+def get_whales_by_asset(
+    request: Request,
+    asset: str = Path(..., min_length=1),
+    format: str = Query("json", pattern="^(json|text)$"),
+    limit: int = Query(DEFAULT_WHALE_LIMIT, ge=1, le=250),
+):
+    items = filter_shared_whales_by_asset(asset)[:limit]
+    meta = get_cache_meta()
+    payload = {
+        "meta": {
+            "service": "AsyncSignals",
+            "endpoint": "whales_by_asset",
+            "limit": limit,
+            "asset_filter": asset.upper(),
+            "count": len(items),
+            "generated_at": meta.get("cache_loaded_at"),
+            "cache_status": meta.get("cache_status"),
+        },
+        "items": items,
+    }
+
+    if format == "text":
+        return PlainTextResponse(render_shared_whales_text(items))
+    return JSONResponse(content=to_jsonable(payload))
+
+
+@app.get("/summaries")
+@limiter.limit("20/minute")
+def get_summaries(
+    request: Request,
+    format: str = Query("json", pattern="^(json|text)$"),
+    asset: Optional[str] = Query(None),
+):
+    items = get_cached_section("summaries", [])
+    if asset:
+        items = filter_summaries_by_asset(asset)
+
+    meta = get_cache_meta()
+    payload = {
+        "meta": {
+            "service": "AsyncSignals",
+            "endpoint": "summaries",
+            "asset_filter": asset.upper() if asset else None,
+            "count": len(items),
+            "generated_at": meta.get("cache_loaded_at"),
+            "cache_status": meta.get("cache_status"),
+        },
+        "items": items,
+    }
+
+    return respond(payload, format, render_summaries_text)
+
+
+@app.get("/summaries/{asset}")
+@limiter.limit("20/minute")
+def get_summaries_by_asset(
+    request: Request,
+    asset: str = Path(..., min_length=1),
+    format: str = Query("json", pattern="^(json|text)$"),
+):
+    items = filter_summaries_by_asset(asset)
+    meta = get_cache_meta()
+    payload = {
+        "meta": {
+            "service": "AsyncSignals",
+            "endpoint": "summaries_by_asset",
+            "asset_filter": asset.upper(),
+            "count": len(items),
+            "generated_at": meta.get("cache_loaded_at"),
+            "cache_status": meta.get("cache_status"),
+        },
+        "items": items,
+    }
+
+    return respond(payload, format, render_summaries_text)
+
+
+@app.get("/signals")
+@limiter.limit("20/minute")
+def get_signals(
+    request: Request,
+    format: str = Query("json", pattern="^(json|text)$"),
+    limit: int = Query(DEFAULT_SIGNAL_LIMIT, ge=1, le=500),
+    signal_type: Optional[str] = Query(None),
+):
+    items = get_cached_section("signals", [])
+    if signal_type:
+        items = filter_signals_by_type(signal_type)
+    items = items[:limit]
+
+    meta = get_cache_meta()
+    payload = {
+        "meta": {
+            "service": "AsyncSignals",
+            "endpoint": "signals",
+            "limit": limit,
+            "signal_type_filter": signal_type.upper() if signal_type else None,
+            "count": len(items),
+            "generated_at": meta.get("cache_loaded_at"),
+            "cache_status": meta.get("cache_status"),
+        },
+        "items": items,
+    }
+
+    return respond(payload, format, render_signals_text)
+
+
+@app.get("/signals/{signal_type}")
+@limiter.limit("20/minute")
+def get_signals_by_type(
+    request: Request,
+    signal_type: str = Path(..., min_length=1),
+    format: str = Query("json", pattern="^(json|text)$"),
+    limit: int = Query(DEFAULT_SIGNAL_LIMIT, ge=1, le=500),
+):
+    items = filter_signals_by_type(signal_type)[:limit]
+    meta = get_cache_meta()
+    payload = {
+        "meta": {
+            "service": "AsyncSignals",
+            "endpoint": "signals_by_type",
+            "limit": limit,
+            "signal_type_filter": signal_type.upper(),
+            "count": len(items),
+            "generated_at": meta.get("cache_loaded_at"),
+            "cache_status": meta.get("cache_status"),
+        },
+        "items": items,
+    }
+
+    return respond(payload, format, render_signals_text)
+
+
+@app.get("/polkadot")
+@limiter.limit("20/minute")
+def get_polkadot(
+    request: Request,
+    format: str = Query("json", pattern="^(json|text)$"),
+    derived_limit: int = Query(DEFAULT_POLKADOT_LIMIT, ge=1, le=200),
+    xcm_transfer_limit: int = Query(20, ge=1, le=100),
+):
+    polkadot = get_cached_polkadot()
+    polkadot_copy = {
+        "available": polkadot.get("available", False),
+        "rpc_snapshot": polkadot.get("rpc_snapshot", []),
+        "chain_activity": polkadot.get("chain_activity", []),
+        "derived_signals": polkadot.get("derived_signals", [])[:derived_limit],
+        "extrinsic_feed": polkadot.get("extrinsic_feed", []),
+        "staking": polkadot.get("staking", []),
+        "treasury": polkadot.get("treasury", []),
+        "validators": polkadot.get("validators", []),
+        "xcm_summary": polkadot.get("xcm_summary", []),
+        "xcm_transfers": polkadot.get("xcm_transfers", [])[:xcm_transfer_limit],
+        "opengov": polkadot.get("opengov", []),
+    }
+
+    meta = get_cache_meta()
+    payload = {
+        "meta": {
+            "service": "AsyncSignals",
+            "endpoint": "polkadot",
+            "generated_at": meta.get("cache_loaded_at"),
+            "derived_limit": derived_limit,
+            "xcm_transfer_limit": xcm_transfer_limit,
+            "cache_status": meta.get("cache_status"),
+        },
+        "items": polkadot_copy,
+    }
+
+    if format == "text":
+        bundle_like = {
+            "meta": payload["meta"],
+            "highlights": {},
+            "summaries": [],
+            "signals": [],
+            "market": [],
+            "market_reference": [],
+            "whales": [],
+            "news": [],
+            "polkadot": payload["items"],
+        }
+        return PlainTextResponse(render_bundle_text(bundle_like))
+
+    return JSONResponse(content=to_jsonable(payload))
+
+
+@app.get("/polkadot/whales")
+@limiter.limit("20/minute")
+def get_polkadot_whales(
+    request: Request,
+    format: str = Query("json", pattern="^(json|text)$"),
+    asset_symbol: Optional[str] = Query(None),
+    min_usd: float = Query(DEFAULT_POLKADOT_WHALE_MIN_USD, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+):
+    polkadot = get_cached_polkadot()
+    all_rows = polkadot.get("xcm_transfers", [])
+
+    filtered_all = filter_polkadot_whales_from_rows(
+        all_rows,
+        asset_symbol=asset_symbol,
+        min_usd=min_usd,
+    )
+    items = filtered_all[:limit]
+
+    rows_after_asset_filter = [
+        x for x in all_rows
+        if not asset_symbol or str(x.get("asset_symbol", "")).upper() == asset_symbol.upper()
+    ]
+
+    meta = get_cache_meta()
+    payload = {
+        "meta": {
+            "service": "AsyncSignals",
+            "endpoint": "polkadot_whales",
+            "asset_symbol_filter": asset_symbol.upper() if asset_symbol else None,
+            "min_usd": min_usd,
+            "limit": limit,
+            "count": len(items),
+            "total_rows_before_filters": len(all_rows),
+            "rows_after_asset_filter": len(rows_after_asset_filter),
+            "rows_with_value_usd": count_rows_with_value_usd(rows_after_asset_filter),
+            "rows_without_value_usd": count_rows_without_value_usd(rows_after_asset_filter),
+            "generated_at": meta.get("cache_loaded_at"),
+            "cache_status": meta.get("cache_status"),
+        },
+        "items": items,
+    }
+
+    if format == "text":
+        return PlainTextResponse(render_polkadot_whales_text(items))
+    return JSONResponse(content=to_jsonable(payload))
+
+
+@app.get("/polkadot/whales/{asset_symbol}")
+@limiter.limit("20/minute")
+def get_polkadot_whales_by_asset(
+    request: Request,
+    asset_symbol: str = Path(..., min_length=1),
+    format: str = Query("json", pattern="^(json|text)$"),
+    min_usd: float = Query(DEFAULT_POLKADOT_WHALE_MIN_USD, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+):
+    polkadot = get_cached_polkadot()
+    all_rows = polkadot.get("xcm_transfers", [])
+
+    filtered_all = filter_polkadot_whales_from_rows(
+        all_rows,
+        asset_symbol=asset_symbol,
+        min_usd=min_usd,
+    )
+    items = filtered_all[:limit]
+
+    rows_after_asset_filter = [
+        x for x in all_rows
+        if str(x.get("asset_symbol", "")).upper() == asset_symbol.upper()
+    ]
+
+    meta = get_cache_meta()
+    payload = {
+        "meta": {
+            "service": "AsyncSignals",
+            "endpoint": "polkadot_whales_by_asset",
+            "asset_symbol_filter": asset_symbol.upper(),
+            "min_usd": min_usd,
+            "limit": limit,
+            "count": len(items),
+            "total_rows_before_filters": len(all_rows),
+            "rows_after_asset_filter": len(rows_after_asset_filter),
+            "rows_with_value_usd": count_rows_with_value_usd(rows_after_asset_filter),
+            "rows_without_value_usd": count_rows_without_value_usd(rows_after_asset_filter),
+            "generated_at": meta.get("cache_loaded_at"),
+            "cache_status": meta.get("cache_status"),
+        },
+        "items": items,
+    }
+
+    if format == "text":
+        return PlainTextResponse(render_polkadot_whales_text(items))
+    return JSONResponse(content=to_jsonable(payload))
 
 
 @app.get("/base")
+@limiter.limit("20/minute")
 def get_base(
+    request: Request,
     format: str = Query("json", pattern="^(json|text)$"),
     derived_limit: int = Query(DEFAULT_POLKADOT_LIMIT, ge=1, le=200),
     transfer_limit: int = Query(50, ge=1, le=200),
@@ -2187,7 +2815,9 @@ def get_base(
 
 
 @app.get("/base/whales")
+@limiter.limit("20/minute")
 def get_base_whales(
+    request: Request,
     format: str = Query("json", pattern="^(json|text)$"),
     limit: int = Query(50, ge=1, le=200),
     asset_symbol: Optional[str] = Query(None),
@@ -2219,12 +2849,14 @@ def get_base_whales(
                     f"usd={fmt_usd(row.get('value_usd'))} | "
                     f"{short_addr(row.get('from_address'))} -> {short_addr(row.get('to_address'))}"
                 )
-        return PlainTextResponse("".join(lines))
+        return PlainTextResponse("\n".join(lines))
     return JSONResponse(content=to_jsonable(payload))
 
 
 @app.get("/base/signals")
+@limiter.limit("20/minute")
 def get_base_signals(
+    request: Request,
     format: str = Query("json", pattern="^(json|text)$"),
     limit: int = Query(DEFAULT_POLKADOT_LIMIT, ge=1, le=200),
     signal_family: Optional[str] = Query(None),
@@ -2256,10 +2888,300 @@ def get_base_signals(
                     f"score={row.get('score', '-')} | family={row.get('signal_family', '-')}"
                 )
                 lines.append(f"  {row.get('description', '')}")
-        return PlainTextResponse("".join(lines))
+        return PlainTextResponse("\n".join(lines))
     return JSONResponse(content=to_jsonable(payload))
+
+
+@app.get("/bnb")
+@limiter.limit("20/minute")
+def get_bnb(
+    request: Request,
+    format: str = Query("json", pattern="^(json|text)$"),
+    whale_limit: int = Query(50, ge=1, le=200),
+    pool_limit: int = Query(50, ge=1, le=200),
+    derived_limit: int = Query(DEFAULT_POLKADOT_LIMIT, ge=1, le=200),
+):
+    bundle = build_bnb_bundle()
+    bundle["whales"] = bundle["whales"][:whale_limit]
+    bundle["pools"] = bundle["pools"][:pool_limit]
+    bundle["derived_signals"] = bundle["derived_signals"][:derived_limit]
+    meta = get_cache_meta()
+    payload = {
+        "meta": {
+            "service": APP_TITLE,
+            "endpoint": "bnb",
+            "generated_at": meta.get("cache_loaded_at"),
+            "cache_status": meta.get("cache_status"),
+        },
+        "items": bundle,
+    }
+    if format == "text":
+        return PlainTextResponse(render_bnb_text(bundle))
+    return JSONResponse(content=to_jsonable(payload))
+
+
+@app.get("/bnb/whales")
+@limiter.limit("20/minute")
+def get_bnb_whales(
+    request: Request,
+    format: str = Query("json", pattern="^(json|text)$"),
+    limit: int = Query(50, ge=1, le=200),
+    asset_symbol: Optional[str] = Query(None),
+):
+    items = fetch_bnb_whales(limit=limit)
+    if asset_symbol:
+        items = [x for x in items if str(x.get("asset_symbol", "")).upper() == asset_symbol.upper()]
+    meta = get_cache_meta()
+    payload = {
+        "meta": {
+            "service": APP_TITLE,
+            "endpoint": "bnb_whales",
+            "limit": limit,
+            "asset_filter": asset_symbol.upper() if asset_symbol else None,
+            "count": len(items),
+            "generated_at": meta.get("cache_loaded_at"),
+            "cache_status": meta.get("cache_status"),
+        },
+        "items": items,
+    }
+    if format == "text":
+        lines = ["ASYNC SIGNALS :: BNB WHALES", ""]
+        if not items:
+            lines.append("No BNB whale events found.")
+        else:
+            for row in items:
+                lines.append(
+                    f"{row.get('timestamp', '-')} | {row.get('asset_symbol', '-')} | "
+                    f"usd={fmt_usd(row.get('value_usd'))} | raw={row.get('value_raw', 0)} | "
+                    f"{short_addr(row.get('from_address'))} -> {short_addr(row.get('to_address'))}"
+                )
+        return PlainTextResponse("\n".join(lines))
+    return JSONResponse(content=to_jsonable(payload))
+
+
+@app.get("/bnb/whales/{asset_symbol}")
+@limiter.limit("20/minute")
+def get_bnb_whales_by_asset(
+    request: Request,
+    asset_symbol: str = Path(..., min_length=1),
+    format: str = Query("json", pattern="^(json|text)$"),
+    limit: int = Query(50, ge=1, le=200),
+):
+    items = fetch_bnb_whales(limit=limit)
+    items = [x for x in items if str(x.get("asset_symbol", "")).upper() == asset_symbol.upper()]
+    meta = get_cache_meta()
+    payload = {
+        "meta": {
+            "service": APP_TITLE,
+            "endpoint": "bnb_whales_by_asset",
+            "limit": limit,
+            "asset_filter": asset_symbol.upper(),
+            "count": len(items),
+            "generated_at": meta.get("cache_loaded_at"),
+            "cache_status": meta.get("cache_status"),
+        },
+        "items": items,
+    }
+    if format == "text":
+        lines = ["ASYNC SIGNALS :: BNB WHALES", ""]
+        if not items:
+            lines.append("No BNB whale events found.")
+        else:
+            for row in items:
+                lines.append(
+                    f"{row.get('timestamp', '-')} | {row.get('asset_symbol', '-')} | "
+                    f"usd={fmt_usd(row.get('value_usd'))} | raw={row.get('value_raw', 0)} | "
+                    f"{short_addr(row.get('from_address'))} -> {short_addr(row.get('to_address'))}"
+                )
+        return PlainTextResponse("\n".join(lines))
+    return JSONResponse(content=to_jsonable(payload))
+
+
+@app.get("/bnb/pools")
+@limiter.limit("20/minute")
+def get_bnb_pools(
+    request: Request,
+    format: str = Query("json", pattern="^(json|text)$"),
+    limit: int = Query(50, ge=1, le=200),
+):
+    items = fetch_bnb_pools(limit=limit)
+    meta = get_cache_meta()
+    payload = {
+        "meta": {
+            "service": APP_TITLE,
+            "endpoint": "bnb_pools",
+            "limit": limit,
+            "count": len(items),
+            "generated_at": meta.get("cache_loaded_at"),
+            "cache_status": meta.get("cache_status"),
+        },
+        "items": items,
+    }
+    if format == "text":
+        lines = ["ASYNC SIGNALS :: BNB DEX POOLS", ""]
+        if not items:
+            lines.append("No BNB pools found.")
+        else:
+            for row in items:
+                lines.append(
+                    f"{row.get('pool_id', '-')} | {row.get('token0_symbol', '-')}/{row.get('token1_symbol', '-')} | "
+                    f"TVL={fmt_usd(row.get('tvl_usd'))} | vol24h={fmt_usd(row.get('volume_24h_usd'))} | "
+                    f"tx24h={row.get('tx_count_24h', 0)}"
+                )
+        return PlainTextResponse("\n".join(lines))
+    return JSONResponse(content=to_jsonable(payload))
+
+
+@app.get("/bnb/risk")
+@limiter.limit("20/minute")
+def get_bnb_risk(
+    request: Request,
+    format: str = Query("json", pattern="^(json|text)$"),
+    limit: int = Query(50, ge=1, le=200),
+):
+    items = fetch_bnb_risk_scores(limit=limit)
+    meta = get_cache_meta()
+    payload = {
+        "meta": {
+            "service": APP_TITLE,
+            "endpoint": "bnb_risk",
+            "limit": limit,
+            "count": len(items),
+            "generated_at": meta.get("cache_loaded_at"),
+            "cache_status": meta.get("cache_status"),
+        },
+        "items": items,
+    }
+    if format == "text":
+        lines = ["ASYNC SIGNALS :: BNB YIELD RISK SCORES", ""]
+        if not items:
+            lines.append("No BNB risk scores found.")
+        else:
+            for row in items:
+                lines.append(
+                    f"[{row.get('risk_flag', '-').upper()}] {row.get('pool_name', '-')} | "
+                    f"score={row.get('risk_score', '-')} | {row.get('explanation', '')}"
+                )
+        return PlainTextResponse("\n".join(lines))
+    return JSONResponse(content=to_jsonable(payload))
+
+
+@app.get("/bnb/validators")
+@limiter.limit("20/minute")
+def get_bnb_validators(
+    request: Request,
+    format: str = Query("json", pattern="^(json|text)$"),
+    limit: int = Query(50, ge=1, le=200),
+):
+    items = fetch_bnb_validators(limit=limit)
+    meta = get_cache_meta()
+    payload = {
+        "meta": {
+            "service": APP_TITLE,
+            "endpoint": "bnb_validators",
+            "limit": limit,
+            "count": len(items),
+            "generated_at": meta.get("cache_loaded_at"),
+            "cache_status": meta.get("cache_status"),
+        },
+        "items": items,
+    }
+    if format == "text":
+        lines = ["ASYNC SIGNALS :: BNB VALIDATORS", ""]
+        if not items:
+            lines.append("No BNB validators found.")
+        else:
+            for row in items:
+                lines.append(
+                    f"{row.get('validator_address', '-')} | missed={row.get('missed_blocks_count', '-')} | "
+                    f"active={row.get('is_active', '-')} | apr={row.get('staking_apr', 'N/A')}"
+                )
+        return PlainTextResponse("\n".join(lines))
+    return JSONResponse(content=to_jsonable(payload))
+
+
+@app.get("/bnb/gas")
+@limiter.limit("20/minute")
+def get_bnb_gas(
+    request: Request,
+    format: str = Query("json", pattern="^(json|text)$"),
+):
+    items = fetch_bnb_gas_forecast()
+    meta = get_cache_meta()
+    payload = {
+        "meta": {
+            "service": APP_TITLE,
+            "endpoint": "bnb_gas",
+            "count": len(items),
+            "generated_at": meta.get("cache_loaded_at"),
+            "cache_status": meta.get("cache_status"),
+        },
+        "items": items,
+    }
+    if format == "text":
+        lines = ["ASYNC SIGNALS :: BNB GAS FORECAST", ""]
+        if not items:
+            lines.append("No BNB gas forecast found.")
+        else:
+            for row in items:
+                lines.append(
+                    f"{row.get('forecast_at', '-')} | current={row.get('current_gas_price_gwei', '-')} gwei | "
+                    f"avg50={row.get('avg_gas_50_blocks', '-')} | forecast1h={row.get('forecast_1h_gwei', '-')} | "
+                    f"congestion={row.get('congestion_level', '-')}"
+                )
+        return PlainTextResponse("\n".join(lines))
+    return JSONResponse(content=to_jsonable(payload))
+
+
+@app.get("/bnb/signals")
+@limiter.limit("20/minute")
+def get_bnb_signals(
+    request: Request,
+    format: str = Query("json", pattern="^(json|text)$"),
+    limit: int = Query(DEFAULT_POLKADOT_LIMIT, ge=1, le=200),
+    signal_family: Optional[str] = Query(None),
+):
+    items = fetch_bnb_derived(limit=limit)
+    if signal_family:
+        items = [x for x in items if str(x.get("signal_family", "")).lower() == signal_family.lower()]
+    meta = get_cache_meta()
+    payload = {
+        "meta": {
+            "service": APP_TITLE,
+            "endpoint": "bnb_signals",
+            "limit": limit,
+            "family_filter": signal_family.lower() if signal_family else None,
+            "count": len(items),
+            "generated_at": meta.get("cache_loaded_at"),
+            "cache_status": meta.get("cache_status"),
+        },
+        "items": items,
+    }
+    if format == "text":
+        lines = ["ASYNC SIGNALS :: BNB SIGNALS", ""]
+        if not items:
+            lines.append("No BNB derived signals found.")
+        else:
+            for row in items:
+                lines.append(
+                    f"[{row.get('severity', '-').upper()}] {row.get('title', '-')} | "
+                    f"score={row.get('score', '-')} | family={row.get('signal_family', '-')}"
+                )
+                lines.append(f"  {row.get('description', '')}")
+        return PlainTextResponse("\n".join(lines))
+    return JSONResponse(content=to_jsonable(payload))
+
+
+@app.get("/bundle")
+@limiter.limit("20/minute")
+def get_bundle(request: Request, format: str = Query("json", pattern="^(json|text)$")):
+    payload = cached_bundle_with_meta()
+    if format == "text":
+        return PlainTextResponse(render_bundle_text(payload))
+    return JSONResponse(content=to_jsonable(payload))
+
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("polkadot_api:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=False)
