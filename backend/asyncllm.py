@@ -48,6 +48,7 @@ def fetch_context_from_db() -> str:
         news_text = ""
         polkadot_text = ""
         base_text = ""
+        bnb_text = ""
 
         cursor.execute("""
             SELECT symbol, current_price, market_cap, price_change_percentage_24h
@@ -84,7 +85,6 @@ def fetch_context_from_db() -> str:
             for r in news_rows
         )
 
-        # Polkadot context
         cursor.execute("""
             SELECT relay_chain, chain_name, tx_count, tps, total_fees_usd, activity_score, alert_level
             FROM POLKADOT_CHAIN_ACTIVITY_DAILY
@@ -112,7 +112,6 @@ def fetch_context_from_db() -> str:
                 for r in polkadot_signals
             )
 
-        # Base context
         cursor.execute("""
             SELECT activity_date, chain_name, tx_count, tps, total_fees_usd, activity_score, alert_level
             FROM BASE_CHAIN_ACTIVITY_DAILY
@@ -139,6 +138,84 @@ def fetch_context_from_db() -> str:
                 for r in base_signals
             )
 
+        cursor.execute("""
+            SELECT captured_at, latest_block_number, tps_1min, gas_price_gwei, tx_count
+            FROM BNB_RPC_SNAPSHOT
+            ORDER BY captured_at DESC
+            FETCH FIRST 1 ROWS ONLY
+        """)
+        bnb_rpc_rows = cursor.fetchall()
+        if bnb_rpc_rows:
+            r = bnb_rpc_rows[0]
+            bnb_text = f"BNB RPC: block={r[1]} tps={r[2]} gas={r[3]} tx_count={r[4]}"
+
+        cursor.execute("""
+            SELECT timestamp, asset_symbol, value_usd, from_address, to_address, transfer_type
+            FROM BNB_WHALE_EVENTS
+            ORDER BY timestamp DESC
+            FETCH FIRST 15 ROWS ONLY
+        """)
+        bnb_whale_rows = cursor.fetchall()
+        if bnb_whale_rows:
+            bnb_text += "\nBNB Whales:\n"
+            bnb_text += "\n".join(
+                f"{r[0]} | {r[1]} | usd={r[2]} | {r[3]} -> {r[4]} | type={r[5]}"
+                for r in bnb_whale_rows
+            )
+
+        cursor.execute("""
+            SELECT signal_date, signal_family, severity, score, title, description
+            FROM BNB_DERIVED_SIGNALS
+            ORDER BY signal_date DESC, score DESC
+            FETCH FIRST 10 ROWS ONLY
+        """)
+        bnb_signals = cursor.fetchall()
+        if bnb_signals:
+            bnb_text += "\n\nBNB Signals:\n"
+            bnb_text += "\n".join(
+                f"[{r[2]}] {r[3]} | {r[1]} | {r[4]}"
+                for r in bnb_signals
+            )
+
+        cursor.execute("""
+            SELECT tx_hash, event_timestamp, token, amount, usd_value, protocol_tag, direction
+            FROM SUI_WHALE_EVENTS
+            ORDER BY event_timestamp DESC
+            FETCH FIRST 15 ROWS ONLY
+        """)
+        sui_rows = cursor.fetchall()
+        sui_text = "\n".join(
+            f"{r[1]} | {r[2]} | amount={r[3]} | usd={r[4]} | proto={r[5]} | dir={r[6]}"
+            for r in sui_rows
+        )
+
+        cursor.execute("""
+            SELECT protocol, volume_usd, tx_count
+            FROM SUI_PROTOCOL_EXPOSURE
+            ORDER BY volume_usd DESC
+            FETCH FIRST 8 ROWS ONLY
+        """)
+        sui_proto_rows = cursor.fetchall()
+        if sui_proto_rows:
+            sui_text += "\n\nSui Protocol Exposure:\n"
+            sui_text += "\n".join(
+                f"{r[0]} | vol=${r[1]} | txs={r[2]}"
+                for r in sui_proto_rows
+            )
+
+        cursor.execute("""
+            SELECT node_id, chain, ts, success_rate, avg_latency_ms, error_code, runbook_advice
+            FROM NODEOPS_METRICS
+            WHERE ts >= SYSTIMESTAMP - INTERVAL '24' HOUR
+            ORDER BY ts DESC
+            FETCH FIRST 10 ROWS ONLY
+        """)
+        nodeops_rows = cursor.fetchall()
+        nodeops_text = "\n".join(
+            f"{r[0]} | {r[1]} | success={r[3]}% | latency={r[4]}ms | err={r[5] or 'none'}"
+            for r in nodeops_rows
+        )
+
         return (
             "=== PRICES ===\n"
             f"{prices_text}\n\n"
@@ -149,8 +226,16 @@ def fetch_context_from_db() -> str:
             "=== POLKADOT ===\n"
             f"{polkadot_text}\n\n"
             "=== BASE ===\n"
-            f"{base_text}"
+            f"{base_text}\n\n"
+            "=== BNB ===\n"
+            f"{bnb_text}\n\n"
+            "=== SUI ===\n"
+            f"{sui_text}\n\n"
+            "=== NODEOPS ===\n"
+            f"{nodeops_text}"
+
         )
+    
     finally:
         cursor.close()
         conn.close()
@@ -320,10 +405,50 @@ def build_rule_based_summary(context: str, asset: str) -> str:
             "and DEX/bridge signals remain active. Review the Base L2 tab for live sequencer throughput, "
             "builder velocity, and fee pressure indicators."
         )
+    if asset == "BNB":
+        return (
+            "BNB summary is running on fallback mode. BNB Chain telemetry, whale transfers, "
+            "DEX pool risk scores, validator health, and gas forecasts remain active. "
+            "Review the BNB tab for live throughput, builder velocity, and fee pressure indicators."
+        )
     return (
         f"{asset} summary is temporarily running on fallback mode. Core telemetry remains active even though "
         f"language-model providers are currently unavailable."
     )
+
+def generate_nodeops_runbook(error_code: str, node_context: str) -> str:
+    runbooks = {
+        "NODE_OVERLOADED": (
+            "Node is processing more jobs than its resource allocation allows. "
+            "CPU or memory saturation is causing degraded performance."
+        ),
+        "RPC_UNAVAILABLE": (
+            "Primary RPC endpoint is unreachable. This may be a network partition, "
+            "provider outage, or firewall/DNS issue."
+        ),
+        "NONCE_TOO_LOW": (
+            "The node's transaction nonce is out of sync with the chain. "
+            "A prior transaction may be stuck or replaced."
+        ),
+        "REPLACEMENT_UNDERPRICED": (
+            "A transaction replacement was attempted with insufficient gas bump. "
+            "Network requires higher fee to replace pending tx."
+        ),
+        "INSUFFICIENT_FUNDS": (
+            "Node wallet lacks sufficient native gas token to execute jobs. "
+            "Review gas spend vs reward economics immediately."
+        ),
+    }
+
+    explanation = runbooks.get(error_code, "Unknown error code. Manual investigation required.")
+
+    return (
+        f"Error: {error_code}\n"
+        f"Context: {node_context}\n"
+        f"Analysis: {explanation}\n"
+        f"[This runbook is rule-based. With funding: Oracle 26AI vector search + semantic anomaly matching.]"
+    )
+
 
 
 async def generate_summary(client: httpx.AsyncClient, context: str, asset: str) -> str:
@@ -395,12 +520,18 @@ async def main():
         sol_summary = await generate_summary(client, context, "SOL")
         dot_summary = await generate_summary(client, context, "DOT")
         base_summary = await generate_summary(client, context, "BASE")
+        bnb_summary = await generate_summary(client, context, "BNB")
+        sui_summary = await generate_summary(client, context, "SUI")
+        nodeops_summary = await generate_summary(client, context, "NODEOPS")
 
     rows = [
         {"asset": "BTC", "summary": btc_summary, "timestamp": utc_now_str()},
         {"asset": "SOL", "summary": sol_summary, "timestamp": utc_now_str()},
         {"asset": "DOT", "summary": dot_summary, "timestamp": utc_now_str()},
         {"asset": "BASE", "summary": base_summary, "timestamp": utc_now_str()},
+        {"asset": "BNB", "summary": bnb_summary, "timestamp": utc_now_str()},
+        {"asset": "SUI", "summary": sui_summary, "timestamp": utc_now_str()},
+        {"asset": "NODEOPS", "summary": nodeops_summary, "timestamp": utc_now_str()},
     ]
 
     save_summaries(rows)
