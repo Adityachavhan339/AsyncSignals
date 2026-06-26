@@ -53,10 +53,18 @@ Supported by the Alchemy Solana Fund.
 | `nodeops_telemetry.py` | Node health monitoring, runbooks, error classification, metrics |
 | `asyncllm.py` | Multi-provider AI summaries + cross-chain intelligence fusion |
 | `api.py` | FastAPI layer (cached endpoints + aggregation + public API) |
-
+| `sol.py` | Solana intelligence (real-time whale flows, protocol analytics, market stress signals, DEX discovery mode) | 
 ---
 
 ## Key Modules
+
+### Solana (sol.py)
+- Multi-RPC failover (Helius primary, QuickNode backup)
+-Three-method transfer extraction (parsed instructions, SOL balance changes, SPL token deltas)
+- Whale wallet discovery mode (scans Jupiter, Raydium, Orca, Pump.fun, USDC top holders)
+- Institutional classification (tiers, risk flags, impact scores, slippage estimates)
+-Protocol volume tracking (Compute Budget, System Program, SPL Token, DEX aggregators)
+- Purpose: Detect large capital movements, protocol dominance shifts, and market stress from on-chain Solana activity |
 
 ### Base L2 (base.py)
 - Multi-provider RPC redundancy (Alchemy, ChainStack, BlockPI, NodeReal)
