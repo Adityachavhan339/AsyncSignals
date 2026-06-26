@@ -137,6 +137,34 @@ export async function postNodeOpsTelemetry(payload: Record<string, any>) {
   return res.json();
 }
 
+// ── Solana endpoints ──
+export async function fetchSol(whaleLimit = 50) {
+  const res = await fetch(`${API_URL}/sol?whale_limit=${whaleLimit}`, {
+    next: { revalidate: 60 },
+  });
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchSolWhales(limit = 50, minUsd = 10000, protocol?: string, tier?: string) {
+  const url = new URL(`${API_URL}/sol/whales`);
+  url.searchParams.set("limit", String(limit));
+  url.searchParams.set("min_usd", String(minUsd));
+  if (protocol) url.searchParams.set("protocol", protocol);
+  if (tier && tier !== "all") url.searchParams.set("tier", tier);
+  const res = await fetch(url.toString(), { next: { revalidate: 60 } });
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchSolIntelligence() {
+  const res = await fetch(`${API_URL}/sol/intelligence`, {
+    next: { revalidate: 60 },
+  });
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
 // ── Utilities ──
 export function fmtUsd(value: number | null | undefined): string {
   if (value == null) return "n/a";
