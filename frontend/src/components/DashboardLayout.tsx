@@ -28,6 +28,7 @@ const navItems = [
   { name: "Mission Control", icon: Activity, href: "/", color: "text-emerald-400" },
   { name: "Whale Tracker", icon: Waves, href: "/whales", color: "text-cyan-400" },
   { name: "BNB Smart Chain", icon: Hexagon, href: "/bnb", color: "text-yellow-400" },
+  { name: "Solana", icon: Zap, href: "/sol", color: "text-purple-400" },
   { name: "Sui", icon: Droplets, href: "/sui", color: "text-cyan-400" },
   { name: "Base L2", icon: Layers, href: "/base", color: "text-indigo-400" },
   { name: "NodeOps", icon: Server, href: "/nodeops", color: "text-orange-400" },
